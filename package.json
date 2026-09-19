@@ -13,7 +13,7 @@
     "mock": "GSC_MOCK=1 node src/index.ts",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
-    "test": "TZ=Pacific/Kiritimati node --disable-warning=ExperimentalWarning --test tests/env.test.ts tests/secrets.test.ts tests/gsc.test.ts tests/tools.test.ts tests/e2e.test.ts"
+    "test": "TZ=Pacific/Kiritimati node --disable-warning=ExperimentalWarning --test tests/env.test.ts tests/secrets.test.ts tests/gsc.test.ts tests/db.test.ts tests/tools.test.ts tests/e2e.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

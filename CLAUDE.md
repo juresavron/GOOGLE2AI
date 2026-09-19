@@ -89,15 +89,36 @@ convenience: it is what lets CI assert real behaviour instead of just that the p
 The mock is deterministic on purpose. One that drifted would make the suite flake for reasons
 unrelated to the server.
 
+## The database
+
+`db/schema.sql` is applied to GOOGLE2AI's **own** Supabase project, and the preflight block at the
+top of it refuses to run on imap2ai's or whatsapp2ai's. That guard is not paranoia: `mcp_tokens` and
+`mcp_calls` exist in all three, `create table if not exists` would skip them, and the policy
+statements would then drop that product's working policies and recreate them joined to
+`gsc_accounts` — cutting its customers off with no error anywhere.
+
+`src/pg.ts` and `src/supabase-ca.ts` are whatsapp2ai's, essentially unchanged: only the probe table
+and the migration filenames differ. Read `validateDatabaseUrl()` first if a deploy cannot reach the
+database — Supabase's direct host publishes only an AAAA record and Fly has no public IPv6 egress,
+so the Session pooler string is the one that works.
+
+`src/db.ts` holds every statement the server runs, and the rule that holds it together is that a
+statement reachable from a signed-in user takes `userId` and joins on it **in the same statement** —
+not look-up-then-check-then-write, which has a window and a path to forget. The RLS policies say the
+same thing a second time for the PostgREST surface; the server connects as the service role and
+bypasses RLS, so those joins are the real enforcement for everything in this file.
+
 ## Stages
 
 1. ✅ hosted MCP core over Streamable HTTP
 2. ✅ deploy pipeline and docs
-3. ⬜ Postgres mirror — Search Console keeps 16 months and rate-limits at ~1200 queries/minute, so a
-   mirror buys history that Google deletes and answers that cost no quota
-4. ⬜ multi-tenant SaaS — Supabase sign-in, dashboard, revocable per-tenant tokens at
-   `/c/<token>/mcp`, operator panel. Needs a **Google OAuth consent flow**, which neither sibling
-   has: their tenants hand over a password, and a Search Console tenant cannot.
+3. ⬜ Postgres mirror — deferred behind stage 4, being an optimisation rather than the critical path.
+   Search Console keeps 16 months and rate-limits at ~1200 queries/minute, so a mirror buys history
+   that Google deletes and answers that cost no quota
+4. 🔧 multi-tenant SaaS — schema, sealed credentials, `pg.ts` and `db.ts` are in. Remaining: the
+   **Google OAuth consent flow** (net-new; neither sibling has one, because their tenants hand over
+   a password and a Search Console tenant cannot), tenants + supervisor, Supabase sign-in, the
+   dashboard, landing and legal pages, the operator panel, and `/c/<token>/mcp`.
 
 ## Provenance
 
