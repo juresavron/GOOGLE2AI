@@ -1,0 +1,7 @@
+# Only for the self-hosted path (docker-compose.yml). Fly terminates TLS itself, so none of this is
+# used there — it is kept for a VPS, the way imap2ai and whatsapp2ai keep theirs.
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy google2ai:8000
+	tls {$ACME_EMAIL}
+}

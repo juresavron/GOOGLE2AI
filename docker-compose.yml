@@ -1,0 +1,32 @@
+# Self-hosted on a VPS with ports 80/443 open and a DNS A record pointing at it. Not the deployed
+# path — that is Fly, via .github/workflows/deploy.yml.
+services:
+  google2ai:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Stateless: there is no volume here and nothing to back up. Everything the server needs is in
+      # .env, and everything it knows comes from Google.
+      HOST: 0.0.0.0
+      PORT: 8000
+    expose:
+      - '8000'
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    env_file: .env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - google2ai
+
+volumes:
+  caddy_data:
+  caddy_config:

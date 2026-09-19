@@ -1,219 +1,137 @@
 # GOOGLE2AI
 
-A Model Context Protocol (MCP) server that gives AI agents direct access to your Google Search Console data.
+A small, self-hosted [MCP](https://modelcontextprotocol.io) server that gives Claude read access to
+Google Search Console. Sibling of [IMAP2AI](https://github.com/juresavron/IMAP2AI) and
+[WHATSAPP2AI](https://github.com/juresavron/WHATSAPP2AI): same deployment pattern (Docker, secret in
+the URL, no OAuth between Claude and the server), same "clean text in, clean text out" philosophy.
 
-- **Search analytics** — query clicks, impressions, CTR, and average position by page, query, country, device, or date range
-- **Compare periods** — week-over-week, month-over-month trends
-- **Find opportunities** — high-impression/low-click queries, ranking keywords you didn't know about
-- **Track specific pages** — see which URLs are gaining or losing traction
-- **Index coverage** — check which pages are indexed, excluded, or erroring
-- **Sitemap status** — verify sitemaps are being read and how many URLs are indexed
+It talks to the Search Console API as you, and exposes MCP tools over Streamable HTTP. Nothing is
+sent anywhere except to Google and to the Claude client that holds the secret URL.
 
-Read-only access — this server cannot submit URLs, modify settings, or make any changes to your Search Console properties.
-
-> [!IMPORTANT]
-> Two authentication methods are supported — signing in as yourself with Application Default Credentials, or a service account key. See [Authentication](#authentication) for the trade-offs.
+**Read-only, structurally.** There is no tool here that submits a URL, changes a setting or writes
+anything, and the OAuth scope it asks for (`webmasters.readonly`) cannot do those things even if one
+were added by mistake.
 
 ## Tools
 
-<details>
-<summary><code>list_sites</code></summary>
+| tool | what it does |
+|---|---|
+| `status()` | which credentials are in use, whether Google accepts them, how many properties are visible |
+| `list_sites()` | every property these credentials can read, with the permission level on each |
+| `search_analytics(siteUrl, startDate, endDate, dimensions, rowLimit, searchType, …filters)` | clicks, impressions, CTR and position, grouped by query / page / country / device / date |
+| `compare_periods(siteUrl, days, endDate, dimensions, rowLimit, …filters)` | the same metrics over two consecutive windows, with the change on every row |
+| `inspect_url(inspectionUrl, siteUrl)` | indexing status, last crawl, the canonical Google chose, mobile usability |
+| `list_sitemaps(siteUrl)` | submitted sitemaps: when each was last read, URLs found, URLs indexed |
 
-List all sites (properties) you have access to in Google Search Console.
+Properties are addressed exactly as Search Console spells them — `sc-domain:example.com` for a
+domain property, `https://example.com/` (with the trailing slash) for a URL-prefix one. Set
+`GSC_DEFAULT_SITE` and every tool may be called without one.
 
-No parameters required.
-</details>
+Filters are shared by the two analytics tools: `queryFilter`, `pageFilter` (both accept a `regex:`
+prefix), `countryFilter` (ISO alpha-3), `deviceFilter`.
 
-<details>
-<summary><code>search_analytics</code></summary>
+### The three-day lag
 
-Query search analytics data — clicks, impressions, CTR, and position.
+Search Console publishes nothing for today or yesterday, and the last two days of any range are
+incomplete and will rise later. Every date range left unset therefore **ends three days ago**, and
+the connector's instructions say so, because the alternative is a chart that appears to fall off a
+cliff at the right-hand edge in every single conversation. Data older than 16 months does not exist.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `siteUrl` | string | Yes | Site URL as it appears in Search Console (e.g. `https://example.com/` or `sc-domain:example.com`) |
-| `startDate` | string | Yes | Start date in `YYYY-MM-DD` format |
-| `endDate` | string | Yes | End date in `YYYY-MM-DD` format |
-| `dimensions` | string | No | Comma-separated: `query`, `page`, `country`, `device`, `searchAppearance`, `date` |
-| `rowLimit` | number | No | Max rows to return (default 100, max 25000) |
-| `searchType` | string | No | `web`, `image`, `video`, `news`, `discover`, or `googleNews` (default `web`) |
-| `queryFilter` | string | No | Filter by query. Prefix with `regex:` for regex matching |
-| `pageFilter` | string | No | Filter by page URL. Prefix with `regex:` for regex matching |
-| `countryFilter` | string | No | ISO 3166-1 alpha-3 country code (e.g. `USA`, `GBR`) |
-| `deviceFilter` | string | No | `DESKTOP`, `MOBILE`, or `TABLET` |
-</details>
+## Deploy to Fly.io (~10 minutes)
 
-<details>
-<summary><code>inspect_url</code></summary>
-
-Check indexing status, crawl info, and mobile usability for a URL.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `siteUrl` | string | Yes | Site URL as it appears in Search Console |
-| `inspectionUrl` | string | Yes | The full URL to inspect (must belong to the site) |
-</details>
-
-<details>
-<summary><code>list_sitemaps</code></summary>
-
-List all submitted sitemaps and their status for a site.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `siteUrl` | string | Yes | Site URL as it appears in Search Console |
-</details>
-
-## Installation
+Full walkthrough, including minting the Google credentials: **[DEPLOY.md](DEPLOY.md)**. In short:
 
 ```bash
-git clone https://github.com/juresavron/GOOGLE2AI.git
-cd GOOGLE2AI
-npm install
-npm run build
+fly launch --no-deploy --copy-config --name google2ai --region ams
+fly secrets set MCP_SECRET="$(node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))")" -a google2ai
+node scripts/get-refresh-token.mjs --client-id=… --client-secret=…   # prints the next command
+fly deploy
+curl https://google2ai.fly.dev/healthz          # → ok ready <sha>
 ```
 
-The build writes `build/index.js`, which is what your MCP client runs.
+Then in claude.ai → **Settings → Connectors → Add custom connector**:
 
-## Configuration
+- Name: `GOOGLE2AI`
+- URL: `https://google2ai.fly.dev/<MCP_SECRET>/mcp`
+- No OAuth (the secret in the path is the credential).
 
-### Google Cloud project
+Enable it in the chat's connector list and ask Claude for `list_sites()`.
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/) and create a new project (or select an existing one)
-2. Open the [Search Console API page](https://console.cloud.google.com/marketplace/product/google/searchconsole.googleapis.com) and click **Enable**
+Unlike whatsapp2ai this app is **stateless** — no volume, nothing to restore, and it can be scaled
+across machines freely. `.github/workflows/deploy.yml` owns the deploy: a push to `main` runs the
+tests, deploys, then asserts that the live `/healthz` carries the commit it just pushed and that the
+public `/status` still names no property.
 
-### Authentication
+### VPS with Caddy, instead of Fly
 
-Pick one of the two options below. The server uses the standard Google auth chain, so it picks up whichever you set up: the service account key at `GOOGLE_APPLICATION_CREDENTIALS` if that variable is set, otherwise your gcloud Application Default Credentials.
+```bash
+cp .env.example .env && nano .env   # also DOMAIN, ACME_EMAIL
+docker compose up -d --build
+```
 
-| | Option A — ADC | Option B — service account key |
+### Without docker
+
+Node ≥ 22.18 (runs the TypeScript directly, no build step):
+
+```bash
+npm install && cp .env.example .env && nano .env
+node src/index.ts            # http://0.0.0.0:8000/<MCP_SECRET>/mcp
+```
+
+## Authentication
+
+Four ways, tried in this order. **On a hosted box only the first one works.**
+
+| | how | works on Fly |
 |---|---|---|
-| Who the API calls run as | You | The service account |
-| Search Console access | Already have it for every property you own or were granted | Must be granted per property, which the Search Console UI currently rejects (see below) |
-| Key file to manage | None | JSON key, must be stored outside the repo |
-| Quota project | Required | Not needed (billed to the key's own project) |
+| OAuth refresh token | `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` + `GOOGLE_REFRESH_TOKEN` | **yes** |
+| Service account, inline | `GOOGLE_CREDENTIALS_JSON` holds the whole key | only if already granted |
+| Service account, file | `GOOGLE_APPLICATION_CREDENTIALS` points at the key | only if already granted |
+| gcloud ADC | nothing set | no — there is no gcloud on a container |
 
-#### Option A: sign in as yourself (ADC)
+The service-account rows carry a caveat that is Google's, not this project's: Search Console's
+**Add user** form rejects a freshly created service account with *"Failed to add user: email not
+found"*, so a service account can only read properties some other route already granted it. OAuth
+runs the calls as the person who consented, who already has access to everything they own, which is
+why it is the supported path here.
 
-1. Sign in, requesting the Search Console scope:
+With OAuth, `GOOGLE_QUOTA_PROJECT` is **required** — user credentials must name a project to bill or
+Search Console answers `403 PERMISSION_DENIED` with a message that reads like a permissions problem.
+`/<MCP_SECRET>/setup` is a checklist that names whichever of these is missing.
 
-```bash
-gcloud auth application-default login \
-  --scopes=https://www.googleapis.com/auth/webmasters.readonly,https://www.googleapis.com/auth/cloud-platform
-```
+## Endpoints
 
-2. Set the quota project:
+| path | who can read it |
+|---|---|
+| `GET /healthz` | anyone — `ok <state> <commit>`, for the deploy to grep |
+| `GET /status` | anyone — version, commit, auth kind, counts. **No property names, no error text** |
+| `GET /<MCP_SECRET>/setup` | whoever holds the secret — the configuration checklist |
+| `POST /<MCP_SECRET>/mcp` | whoever holds the secret — the connector |
 
-```bash
-gcloud auth application-default set-quota-project YOUR_PROJECT_ID
-```
+`/status` is deliberately dull: a property name is a customer's domain and the error strings quote
+it, so both are kept off the one endpoint a stranger can read. The deploy asserts their absence on
+every release.
 
-Your credentials must end up with a quota project — with user credentials and no quota project attached, the Search Console API returns `403 PERMISSION_DENIED`:
-
-> Your application is authenticating by using local Application Default Credentials. The searchconsole.googleapis.com API requires a quota project, which is not set by default.
-
-Step 1 tries to attach your current `gcloud config` project automatically, but it silently skips that when the account you signed in as lacks the `serviceusage.services.use` permission on it (project Editor and Owner both include that permission), leaving you with credentials that get the 403 above:
-
-> WARNING: Cannot add the project "YOUR_PROJECT_ID" to ADC as the quota project because the account in ADC does not have the "serviceusage.services.use" permission on this project.
-
-Running step 2 explicitly is the reliable path, and it is also how you bill a project other than your configured one. The `cloud-platform` scope in step 1 is what allows the quota project to be attached.
-
-You do **not** need to create your own OAuth client ID or pass `--client-id-file`: gcloud's built-in client grants `webmasters.readonly` (confirmed on Google Cloud SDK 557.0.0). The [gcloud reference](https://cloud.google.com/sdk/gcloud/reference/auth/application-default/login#--scopes) does say to create an OAuth client ID for scopes outside Google Cloud, so if a future version stops granting this one, that is the fallback:
+## Development
 
 ```bash
-gcloud auth application-default login \
-  --client-id-file=client_id.json \
-  --scopes=https://www.googleapis.com/auth/webmasters.readonly
+npm install
+npm run mock       # GSC_MOCK=1 — seeded demo data, no credentials, no network
+npm run check      # typecheck + the whole suite
 ```
 
-Because the calls run as you, nothing needs to be added in Search Console — you already have access to every property you own or have been granted.
-
-#### Option B: service account key
-
-1. In the Google Cloud Console sidebar, go to **APIs & Services** → **Credentials**
-2. Click **Create Credentials** → **Service account**
-3. Give it a name (e.g. "search-console-mcp"), then click **Create and Continue**
-4. You can skip the optional role/access steps — click **Done**
-5. On the Credentials page, click on the service account you just created
-6. Go to the **Keys** tab → **Add Key** → **Create new key** → select **JSON** → click **Create**
-7. A `.json` key file will download — save it somewhere safe (e.g. `~/.config/gcloud/service-account-key.json`)
-
-> [!CAUTION]
-> Treat this key file like a secret key. Do **not** save it inside your project repo or commit it to git. Store it outside your project directory and reference it by absolute path in your MCP config.
-
-Then add the key path to the server's environment in whichever config you use below:
-
-```json
-      "env": {
-        "GOOGLE_APPLICATION_CREDENTIALS": "/absolute/path/to/service-account-key.json"
-      }
-```
-
-The service account also has to be granted access to each property you want to read:
-
-1. Copy the service account's email address (it looks like `name@project-id.iam.gserviceaccount.com` — you can find it on the service account details page)
-2. Go to [Google Search Console](https://search.google.com/search-console)
-3. Select your property, then go to **Settings** → **Users and permissions**
-4. Click **Add user**, paste the service account email, set the permission to **Restricted**, and click **Add**
-
-> [!WARNING]
-> Step 4 currently fails with "Failed to add user: email not found" for newly created service accounts. If you hit it, use Option A, or use an existing service account that was already added to the property.
-
-### Claude Code
-
-```bash
-claude mcp add google2ai --scope user -- node /absolute/path/to/GOOGLE2AI/build/index.js
-```
-
-`--scope user` makes the server available in all your projects. Use `--scope project` instead to write it to `.mcp.json` in the current directory and share it with your team. Omitting `--scope` defaults to `local`, which only enables it for you in the current project.
-
-Or add it manually to the `"mcpServers"` object in `~/.claude.json` (user scope) or `.mcp.json` (project scope):
-
-```json
-{
-  "mcpServers": {
-    "google2ai": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["/absolute/path/to/GOOGLE2AI/build/index.js"]
-    }
-  }
-}
-```
-
-### Claude Desktop
-
-Add to your `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "google2ai": {
-      "command": "node",
-      "args": ["/absolute/path/to/GOOGLE2AI/build/index.js"]
-    }
-  }
-}
-```
-
-## Usage
-
-Once configured, ask Claude naturally:
-
-- "List my Search Console properties"
-- "Show me the top 20 queries for my site over the last 28 days"
-- "Check the indexing status of https://example.com/blog/my-post"
-- "Compare mobile vs desktop performance this month"
-- "What sitemaps are submitted for my site?"
+The entire suite runs offline against the mock, which is what lets CI assert real behaviour rather
+than just that the process starts.
 
 ## Credits
 
-This project started as a copy of [sarahpark/google-search-console-mcp](https://github.com/sarahpark/google-search-console-mcp)
-by Sarah Park, vendored at upstream commit
+The Search Console tool surface began as a copy of
+[sarahpark/google-search-console-mcp](https://github.com/sarahpark/google-search-console-mcp) by
+Sarah Park (MIT), vendored at upstream commit
 [`cacaf96`](https://github.com/sarahpark/google-search-console-mcp/commit/cacaf9628d119a40490e80fa8e5f936eba761c7d).
-The server source and this documentation derive from that project, which is
-MIT licensed — see [LICENSE](LICENSE), whose copyright notice is retained
-unchanged.
+That project is a stdio server; the transport, configuration, deployment, tests and the `status` and
+`compare_periods` tools are this repository's. See [LICENSE](LICENSE), whose copyright notice is
+retained unchanged.
 
 ## License
 

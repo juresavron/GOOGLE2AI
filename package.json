@@ -1,42 +1,30 @@
 {
   "name": "google2ai",
   "version": "0.1.0",
-  "description": "A minimal MCP server for Google Search Console",
-  "mcpName": "io.github.juresavron/google2ai",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/juresavron/GOOGLE2AI.git"
-  },
-  "keywords": [
-    "mcp",
-    "model-context-protocol",
-    "google-search-console",
-    "gsc",
-    "seo",
-    "claude",
-    "search-analytics",
-    "url-inspection",
-    "ai"
-  ],
+  "private": true,
+  "description": "Self-hosted MCP server that gives Claude read access to Google Search Console (search analytics, URL inspection, sitemaps).",
   "type": "module",
-  "license": "MIT",
-  "bin": {
-    "google2ai": "build/index.js"
+  "engines": {
+    "node": ">=22.18"
   },
   "scripts": {
-    "build": "tsc && chmod 755 build/index.js",
-    "dev": "tsc --watch"
+    "start": "node src/index.ts",
+    "dev": "node --watch src/index.ts",
+    "mock": "GSC_MOCK=1 node src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
+    "test": "TZ=Pacific/Kiritimati node --disable-warning=ExperimentalWarning --test tests/env.test.ts tests/gsc.test.ts tests/tools.test.ts tests/e2e.test.ts"
   },
-  "files": [
-    "build"
-  ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "express": "^5.1.0",
     "googleapis": "^146.0.0",
-    "zod": "^3.25.0"
+    "pino": "^9.6.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.8.0"
   }
 }

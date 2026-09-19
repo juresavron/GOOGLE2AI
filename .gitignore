@@ -1,7 +1,10 @@
-.mcpregistry_*
+.env
 node_modules/
-build/
-*.json
-!package.json
-!tsconfig.json
-!server.json
+data/
+.DS_Store
+
+# Google credentials are JSON and must never be committed. Named rather than a blanket *.json
+# rule, so package-lock.json stays tracked and `npm ci` keeps working in CI and the Dockerfile.
+service-account*.json
+client_secret*.json
+*-credentials.json

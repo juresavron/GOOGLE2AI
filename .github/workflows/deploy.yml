@@ -1,0 +1,89 @@
+# Deploy to Fly on every push to main, the way imap2ai and whatsapp2ai do it: test, deploy, then
+# prove the running server is the commit we just pushed. Same reason as theirs — the slow part of
+# building one of these was never the bugs, it was not knowing whether the live server had the fix.
+#
+# ONE-TIME SETUP, and the first step is not optional:
+#   1. Fly dashboard -> google2ai -> detach the GitHub repo.
+#      While the repo is attached, FLY DEPLOYS TOO, and two pipelines releasing the same app
+#      concurrently fails with "failed to acquire lease ... held by ...@tokens.fly.io".
+#   2. fly tokens create deploy -a google2ai
+#   3. GitHub -> Settings -> Secrets and variables -> Actions -> new secret
+#      Name: FLY_API_TOKEN   Value: the token
+#   4. Settings -> General -> default branch -> main
+name: deploy
+
+on:
+  push:
+    # main ONLY. Listing the working branch too would double every deploy, and the concurrency group
+    # below would then cancel one of them, possibly after machines had started rolling.
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-google2ai
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - run: npm ci
+      - run: npm run typecheck
+      # Every test runs offline against the seeded mock (GSC_MOCK=1), so CI needs no Google
+      # credentials and cannot spend anybody's API quota.
+      - run: npm test
+
+  deploy:
+    needs: test # never deploy a red build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only -a google2ai --build-arg GIT_SHA=${{ github.sha }}
+
+      - name: Confirm the deployed build is the one we just pushed
+        env:
+          MACHINE: google2ai.fly.dev
+        run: |
+          sleep 20
+          curl -fsS --retry 5 --retry-delay 4 --retry-all-errors https://$MACHINE/healthz | tee /tmp/healthz.txt
+          echo
+          test -s /tmp/healthz.txt || { echo "$MACHINE/healthz returned nothing"; exit 1; }
+          grep -q "${GITHUB_SHA:0:7}" /tmp/healthz.txt \
+            || { echo "MISMATCH: the live server is not running this commit"; exit 1; }
+          echo "OK: live build matches ${GITHUB_SHA:0:7}"
+
+          # /status is public and must stay that way -- it is the one endpoint a stranger can read.
+          curl -fsSL --retry 5 --retry-delay 4 --retry-all-errors https://$MACHINE/status | tee /tmp/status.json
+          echo
+          python3 - <<'PY'
+          import json, sys
+          s = json.load(open('/tmp/status.json'))
+          # A regression that published the customer's domain or the error text (which quotes it)
+          # would be invisible from a green deploy, so assert the absence here rather than trusting
+          # review to catch it. tests/e2e.test.ts asserts the same list against a local server.
+          SECRETS = ('siteUrl', 'site_url', 'default_site', 'defaultSite', 'error',
+                     'secret', 'token', 'refresh_token', 'client_secret', 'quota_project')
+          leaked = [k for k in SECRETS if k in s]
+          if leaked:
+              print(f"PUBLIC /status LEAKS: {leaked}"); sys.exit(1)
+          # Read defensively: this step must report on the payload, never crash on its shape.
+          print(f"OK: /status is clean; commit={s.get('commit')} auth={s.get('auth')} "
+                f"ready={s.get('ready')} properties={s.get('properties')} multi_tenant={s.get('multi_tenant')}")
+          if s.get('auth') == 'adc':
+              print('::error::the live server has no credentials configured -- every tool will fail'); sys.exit(1)
+          if s.get('auth') == 'mock':
+              print('::error::the live server is serving MOCK data'); sys.exit(1)
+          # Credentials that stopped working are the one failure this deploy cannot fix and the one
+          # nobody notices: the server keeps answering while every tool returns an error.
+          if not s.get('healthy'):
+              print('::warning::Google is refusing these credentials -- open /<MCP_SECRET>/setup')
+          PY

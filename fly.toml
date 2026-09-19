@@ -1,0 +1,45 @@
+# fly.toml for google2ai.
+#
+# Note what is NOT here, against whatsapp2ai's: no [[mounts]]. That app keeps a WhatsApp session on a
+# volume and therefore runs on exactly one machine forever. This one is stateless — every answer comes
+# from Google and the credentials are secrets — so it can be scaled across machines and regions
+# freely, and a machine can be replaced without anything to restore.
+
+app = 'google2ai'
+primary_region = 'ams'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  LOG_LEVEL = 'info'
+  PORT = '8000'
+  GSC_TZ = 'Europe/Ljubljana'
+
+# Set with `fly secrets set` rather than here, so nothing sensitive lives in the repo:
+#   MCP_SECRET                                    — the connector URL's path segment; it IS the credential
+#   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET       — the OAuth client
+#   GOOGLE_REFRESH_TOKEN                          — consent, once, as the account that owns the property
+#   GOOGLE_QUOTA_PROJECT                          — REQUIRED with user credentials; 403 without it
+#   GSC_DEFAULT_SITE                              — optional: bind the connector to one property
+#   OPERATOR_NAME / OPERATOR_CONTACT / OPERATOR_LAW, ADMIN_EMAILS — stage 4
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  # Zero would be cheaper and is wrong here: a cold start makes the first tool call of the day time
+  # out in the Claude client, which reads as a broken connector rather than a sleeping one.
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '30s'
+    method = 'GET'
+    path = '/healthz'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'
