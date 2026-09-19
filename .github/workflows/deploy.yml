@@ -37,6 +37,12 @@ jobs:
       # credentials and cannot spend anybody's API quota.
       - run: npm test
 
+      # The Node suite never executes the SQL, so this parses it with Postgres's own grammar --
+      # the only thing that catches a typo in a schema file before the one code path using it
+      # runs in production.
+      - name: The SQL is valid Postgres
+        run: pip install --quiet pglast && python3 scripts/check-sql.py
+
   deploy:
     needs: test # never deploy a red build
     runs-on: ubuntu-latest
