@@ -1,0 +1,42 @@
+{
+  "name": "google2ai",
+  "version": "0.1.0",
+  "description": "A minimal MCP server for Google Search Console",
+  "mcpName": "io.github.juresavron/google2ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/juresavron/GOOGLE2AI.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "google-search-console",
+    "gsc",
+    "seo",
+    "claude",
+    "search-analytics",
+    "url-inspection",
+    "ai"
+  ],
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "google2ai": "build/index.js"
+  },
+  "scripts": {
+    "build": "tsc && chmod 755 build/index.js",
+    "dev": "tsc --watch"
+  },
+  "files": [
+    "build"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "googleapis": "^146.0.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

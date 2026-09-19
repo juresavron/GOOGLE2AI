@@ -1,0 +1,7 @@
+.mcpregistry_*
+node_modules/
+build/
+*.json
+!package.json
+!tsconfig.json
+!server.json
