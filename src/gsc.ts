@@ -108,17 +108,36 @@ export function cleanError(e: unknown): string {
 
 // ------------------------------------------------------------------ the real client
 
+/**
+ * One tenant's own Google credentials, unsealed from the database for the life of a request.
+ *
+ * When this is present it REPLACES the environment entirely: the calls run as the person who
+ * consented, and the four-way chain in env.ts is not consulted at all. That is the whole difference
+ * between the single-account server and the multi-tenant one, and it is deliberately one parameter
+ * rather than a flag — a client built with tenant credentials cannot accidentally fall back to the
+ * operator's own.
+ */
+export interface TenantCreds {
+  clientId: string;
+  clientSecret: string;
+  refreshToken: string;
+  /** The tenant's row overrides the environment, so one account can be billed to another project. */
+  quotaProject: string;
+}
+
 export class GoogleGSC implements GSC {
   private readonly cfg: Config;
   private readonly kind: string;
+  private readonly tenant: TenantCreds | null;
   private api: any = null;
   private err: string | null = null;
   private checked: number | null = null;
   private siteCount: number | null = null;
 
-  constructor(cfg: Config) {
+  constructor(cfg: Config, tenant: TenantCreds | null = null) {
     this.cfg = cfg;
-    this.kind = authKind(cfg);
+    this.tenant = tenant;
+    this.kind = tenant ? 'tenant' : authKind(cfg);
   }
 
   /**
@@ -132,7 +151,11 @@ export class GoogleGSC implements GSC {
     const cfg = this.cfg;
     let auth: any;
 
-    if (this.kind === 'oauth') {
+    if (this.tenant) {
+      const o = new google.auth.OAuth2({ clientId: this.tenant.clientId, clientSecret: this.tenant.clientSecret });
+      o.setCredentials({ refresh_token: this.tenant.refreshToken });
+      auth = o;
+    } else if (this.kind === 'oauth') {
       const o = new google.auth.OAuth2({ clientId: cfg.clientId, clientSecret: cfg.clientSecret });
       o.setCredentials({ refresh_token: cfg.refreshToken });
       auth = o;
@@ -164,7 +187,8 @@ export class GoogleGSC implements GSC {
    * account paths (which bill their own project and ignore it) behave no differently.
    */
   private opts(): { headers?: Record<string, string> } {
-    return this.cfg.quotaProject ? { headers: { 'x-goog-user-project': this.cfg.quotaProject } } : {};
+    const project = this.tenant ? this.tenant.quotaProject : this.cfg.quotaProject;
+    return project ? { headers: { 'x-goog-user-project': project } } : {};
   }
 
   private async call<T>(fn: (api: any) => Promise<T>): Promise<T> {
@@ -250,7 +274,7 @@ export class GoogleGSC implements GSC {
       auth: this.kind,
       ready: this.err === null && this.checked !== null,
       error: this.err,
-      quota_project: this.cfg.quotaProject || null,
+      quota_project: (this.tenant ? this.tenant.quotaProject : this.cfg.quotaProject) || null,
       checked_at: this.checked,
       sites: this.siteCount,
     };
