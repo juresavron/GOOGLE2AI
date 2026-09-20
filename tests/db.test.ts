@@ -149,6 +149,60 @@ test('addToken scopes the insert through a select on user_id', async () => {
   assert.match(q.last(), /a\.user_id = \$2/);
 });
 
+test('putDay issues NO transaction control — Pool.query gets a different connection each call', async () => {
+  const q = new FakeQ();
+  await new Db(q).putDay(ACCOUNT, 'query', '2026-03-01', [
+    { keys: ['a'], clicks: 1, impressions: 10, position: 2 },
+    { keys: ['b'], clicks: 2, impressions: 20, position: 3 },
+  ], true);
+
+  const texts = q.seen.map((x) => x.text.trim().toLowerCase());
+  // This is the regression guard for a real bug. begin/commit over a pg.Pool lands each statement
+  // on a DIFFERENT connection, so nothing is atomic and a pooled connection is handed back stuck
+  // mid-transaction for the next unrelated query to inherit.
+  for (const bad of ['begin', 'commit', 'rollback']) {
+    assert.ok(!texts.some((t) => t === bad || t.startsWith(bad + ' ')), `putDay must not issue ${bad}`);
+  }
+});
+
+test('putDay writes all rows in ONE statement, then the marker', async () => {
+  const q = new FakeQ();
+  await new Db(q).putDay(ACCOUNT, 'query', '2026-03-01', [
+    { keys: ['a'], clicks: 1, impressions: 10, position: 2 },
+    { keys: ['b'], clicks: 2, impressions: 20, position: 3 },
+  ], true);
+
+  // Two statements for two rows, not three: a single statement is atomic by itself, which is what
+  // replaces the transaction.
+  assert.equal(q.seen.length, 2);
+  assert.match(q.seen[0]!.text, /insert into public\.gsc_rows/);
+  assert.match(q.seen[0]!.text, /jsonb_to_recordset/);
+  // Order is the correctness argument: a marker written before its rows says "synced" for a day
+  // that then reads as empty forever.
+  assert.match(q.seen[1]!.text, /insert into public\.gsc_sync/);
+
+  const payload = JSON.parse(String(q.seen[0]!.values[3]));
+  assert.equal(payload.length, 2);
+  assert.deepEqual(payload[0], { keys: ['a'], clicks: 1, impressions: 10, position: 2 });
+});
+
+test('putDay rounds counts, because the columns are integers', async () => {
+  const q = new FakeQ();
+  await new Db(q).putDay(ACCOUNT, 'query', '2026-03-01', [{ keys: ['a'], clicks: 1.6, impressions: 10.4, position: 2.25 }], false);
+  const payload = JSON.parse(String(q.seen[0]!.values[3]));
+  assert.equal(payload[0].clicks, 2);
+  assert.equal(payload[0].impressions, 10);
+  assert.equal(payload[0].position, 2.25, 'position is real, and keeps its precision');
+});
+
+test('an empty day writes the marker and no rows statement at all', async () => {
+  const q = new FakeQ();
+  await new Db(q).putDay(ACCOUNT, 'query', '2026-03-01', [], true);
+  assert.equal(q.seen.length, 1);
+  assert.match(q.only().text, /gsc_sync/);
+  assert.equal(q.only().values[3], 0);
+});
+
 test('setSecret upserts, so re-consenting replaces rather than duplicating', async () => {
   const q = new FakeQ();
   await new Db(q).setSecret(ACCOUNT, { v: 1, wk: 'w', wn: 'n', ct: 'c', n: 'x' });

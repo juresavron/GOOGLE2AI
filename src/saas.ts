@@ -177,7 +177,11 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     // The plaintext connector URL, carried across a redirect exactly once. It is never in the URL,
     // in history or in a log — see OneShot in auth.ts for what that fixed.
     const fresh = typeof req.query.t === 'string' ? oneShot.take(user.id, req.query.t) : null;
-    const base = `${secure(req) ? 'https' : 'http'}://${req.get('host')}`;
+    // PUBLIC_ORIGIN first, and the request's host only as a fallback for local development. The
+    // Host header is attacker-controlled, and this line renders a URL carrying a live connector
+    // token for the user to copy into Claude — a forged host would have them paste their own
+    // credential into somebody else's server. Same reason the OAuth redirect is built from config.
+    const base = (process.env.PUBLIC_ORIGIN || '').replace(/\/+$/, '') || `${secure(req) ? 'https' : 'http'}://${req.get('host')}`;
 
     const cards = accounts.length
       ? (

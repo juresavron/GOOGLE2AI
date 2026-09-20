@@ -333,14 +333,26 @@ export class Db {
   // ---------------------------------------------------------------- the mirror
 
   /**
-   * Write one day's grouped rows, and record that the day was fetched.
+   * Write one day's grouped rows, then record that the day was fetched.
    *
-   * Both halves or neither: a rows write that succeeded while its sync marker failed would look
-   * like an unsynced day forever and be re-fetched every pass, and a sync marker without its rows
-   * would make a real day read as empty. Wrapped in a transaction for that reason alone.
+   * TWO STATEMENTS, NO TRANSACTION, AND THE ORDER IS THE CORRECTNESS ARGUMENT.
    *
-   * The rows upsert is ON CONFLICT rather than delete-then-insert because (account, day, dims,
-   * keys) is the primary key — re-syncing a provisional day rewrites exactly the rows it returns.
+   * This was written as begin / insert-per-row / commit, which was wrong in a way a fake Queryable
+   * cannot show: `pg.Pool.query()` checks out a connection PER CALL. The BEGIN therefore lands on
+   * one connection and is handed straight back to the pool still inside a transaction, the inserts
+   * land on whichever connections they get, and the COMMIT on another — so nothing was atomic, and
+   * a pooled connection was left permanently mid-transaction for the next unrelated query to
+   * inherit. A real transaction needs a checked-out client, which this interface deliberately does
+   * not expose.
+   *
+   * It does not need one. The rows go in ONE multi-row upsert, and a single statement is atomic by
+   * itself; the sync marker follows as a second. A failure between them leaves the day unmarked, so
+   * it is simply re-fetched and re-upserted next pass — harmless. The reverse order is the one that
+   * breaks: a marker written before its rows says "synced" for a day that would then read as empty
+   * forever, which is exactly the lie gsc_sync exists to prevent.
+   *
+   * ON CONFLICT rather than delete-then-insert because (account, day, dims, keys) is the primary
+   * key, so re-syncing a provisional day rewrites exactly the rows it returns.
    */
   async putDay(
     accountId: string,
@@ -349,29 +361,29 @@ export class Db {
     rows: { keys: string[]; clicks: number; impressions: number; position: number }[],
     final: boolean,
   ): Promise<void> {
-    await this.q.query('begin');
-    try {
-      for (const r of rows) {
-        await this.q.query(
-          `insert into public.gsc_rows (account_id, day, dims, keys, clicks, impressions, position)
-           values ($1, $2, $3, $4, $5, $6, $7)
-           on conflict (account_id, day, dims, keys)
-           do update set clicks = excluded.clicks, impressions = excluded.impressions, position = excluded.position`,
-          [accountId, day, dims, r.keys, Math.round(r.clicks), Math.round(r.impressions), r.position],
-        );
-      }
-      await this.q.query(
-        `insert into public.gsc_sync (account_id, day, dims, rows, final, synced_at)
-         values ($1, $2, $3, $4, $5, now())
-         on conflict (account_id, day, dims)
-         do update set rows = excluded.rows, final = excluded.final, synced_at = now()`,
-        [accountId, day, dims, rows.length, final],
+    if (rows.length) {
+      // Carried as one JSON payload rather than N placeholders: the row count is Google's to
+      // choose (up to 25000), and building a parameter list that long is both slower and closer to
+      // Postgres's 65535-parameter ceiling than anything here should be.
+      const payload = JSON.stringify(
+        rows.map((r) => ({ keys: r.keys, clicks: Math.round(r.clicks), impressions: Math.round(r.impressions), position: r.position })),
       );
-      await this.q.query('commit');
-    } catch (e) {
-      await this.q.query('rollback').catch(() => undefined);
-      throw e;
+      await this.q.query(
+        `insert into public.gsc_rows (account_id, day, dims, keys, clicks, impressions, position)
+         select $1, $2::date, $3, r.keys, r.clicks, r.impressions, r.position
+           from jsonb_to_recordset($4::jsonb) as r(keys text[], clicks int, impressions int, position real)
+         on conflict (account_id, day, dims, keys)
+         do update set clicks = excluded.clicks, impressions = excluded.impressions, position = excluded.position`,
+        [accountId, day, dims, payload],
+      );
     }
+    await this.q.query(
+      `insert into public.gsc_sync (account_id, day, dims, rows, final, synced_at)
+       values ($1, $2, $3, $4, $5, now())
+       on conflict (account_id, day, dims)
+       do update set rows = excluded.rows, final = excluded.final, synced_at = now()`,
+      [accountId, day, dims, rows.length, final],
+    );
   }
 
   /**

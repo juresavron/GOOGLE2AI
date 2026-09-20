@@ -161,7 +161,12 @@ export class GoogleOAuth {
     }
     if (!verifier) throw new OAuthError('no_verifier', 'The consent cookie is malformed. Start again.');
 
-    const accountId = state.slice(0, state.indexOf('.'));
+    // Explicit, because `indexOf` returning -1 would make slice(0, -1) quietly hand back the state
+    // minus its last character — a plausible-looking account id built from a malformed state. It
+    // would fail the ownership check in the callback either way, but a value that is wrong rather
+    // than absent is the kind of thing that survives a refactor.
+    const dot = state.indexOf('.');
+    const accountId = dot > 0 ? state.slice(0, dot) : '';
     if (!accountId) throw new OAuthError('bad_state', 'The consent state is malformed. Start again.');
 
     const res = await this.f(TOKEN_URL, {

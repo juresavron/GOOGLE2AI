@@ -206,6 +206,25 @@ test('readCookie finds its own cookie among others and never a prefix of one', (
   assert.equal(readCookie('malformed', CONSENT_COOKIE), '');
 });
 
+test('a state with no separator is refused, not silently truncated', async () => {
+  const g = new FakeGoogle().reply(GOOD_TOKEN);
+  const o = make(g);
+  // Both sides agree, so the CSRF check passes and the parse is what has to catch this. Reading
+  // the account id with slice(0, indexOf('.')) on a dotless state hands back the state minus its
+  // last character — a wrong value rather than an absent one.
+  const cookie = 'nodotatall:someverifier';
+  await assert.rejects(() => o.complete({ code: 'c', state: 'nodotatall', cookie }), (e: unknown) => {
+    assert.equal((e as OAuthError).code, 'bad_state');
+    return true;
+  });
+  assert.equal(g.sent.length, 0, 'and it still spends no code');
+});
+
+test('a state that begins with the separator is refused too', async () => {
+  const o = make(new FakeGoogle());
+  await assert.rejects(() => o.complete({ code: 'c', state: '.nonce', cookie: '.nonce:verifier' }), /malformed/);
+});
+
 test('an unconfigured server says so rather than building a broken URL', () => {
   const o = new GoogleOAuth('', '', REDIRECT, new FakeGoogle().fetch);
   assert.equal(o.configured, false);
