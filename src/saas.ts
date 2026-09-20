@@ -452,14 +452,27 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     // first option submits it deliberately.
     const raw = String(req.body?.property ?? '').trim();
     const property = raw || null;
-    // The CHECK constraint refuses a spelling the API would 403 on; this turns that into a sentence.
-    const ok = await db.setProperty(user.id, id, property).catch(() => false);
+    // NOT `.catch(() => false)`. That turned every failure into "Search Console would not accept
+    // that spelling" — a guess, and the wrong one: what actually failed here was the statement
+    // itself (42P08), which no spelling could have fixed and which left no trace anywhere.
+    // Third time tonight this exact shape has hidden a cause; the rule is that a thrown error and
+    // a refused value are different facts and must not share a message.
+    let ok = false;
+    let failed = false;
+    try {
+      ok = await db.setProperty(user.id, id, property);
+    } catch (e) {
+      failed = true;
+      log.error({ account: id, err: e instanceof Error ? e.stack : String(e) }, 'setting a property failed');
+    }
     tenants.forget(id);
     redirect(
       res,
       ok
         ? '/app?m=' + encodeURIComponent(property ? 'Property set.' : 'Set to all properties — Claude will name one on each question.')
-        : '/app?e=' + encodeURIComponent('That is not a property Search Console would accept.'),
+        : failed
+          ? '/app?e=' + encodeURIComponent('Saving that failed on this server, not at Google. It has been logged; the property is unchanged.')
+          : '/app?e=' + encodeURIComponent('That is not a property Search Console would accept.'),
     );
   });
 

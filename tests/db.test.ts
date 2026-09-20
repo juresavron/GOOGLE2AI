@@ -242,7 +242,11 @@ test('setProperty keeps "all properties" and "not chosen yet" apart, in one stat
   const db = new Db(q);
 
   await db.setProperty(USER, ACCOUNT, 'sc-domain:example.com');
-  assert.match(q.last(), /all_properties = \(\$3 is null\)/, 'the flag is derived, never passed separately');
+  assert.match(q.last(), /all_properties = \(\$3::text is null\)/, 'the flag is derived, never passed separately');
+  // The cast is not style. node-postgres sends parameters untyped and `$3 IS NULL` constrains
+  // nothing, so a bare $3 makes the whole statement unparseable — 42P08, for every value, not
+  // just null. This shipped and broke the button; the assertion is here so it cannot again.
+  assert.doesNotMatch(q.last(), /\(\$3 is null\)/, 'a bare $3 in IS NULL is 42P08 at parse time');
   assert.equal(q.only().values[2], 'sc-domain:example.com');
 
   const q2 = new FakeQ();

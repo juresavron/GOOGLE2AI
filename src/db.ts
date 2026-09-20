@@ -204,9 +204,19 @@ export class Db {
     // Null is "all properties", not "unset": the two are different facts and the column pair keeps
     // them apart. Written in ONE statement so a connector can never be observed with both a
     // default property and the all-properties flag.
+    //
+    // The `::text` casts are LOAD-BEARING, not decoration. node-postgres sends parameters with no
+    // type OIDs and lets the server infer them, and `$3 IS NULL` constrains nothing — so with a
+    // bare `$3` the server cannot resolve the parameter at all and refuses the statement:
+    //
+    //   ERROR 42P08: could not determine data type of parameter $3
+    //
+    // It is a PARSE failure, so it happens for every value, not only null. `PREPARE sp(uuid, uuid,
+    // text)` succeeds by hand precisely because naming the types is the thing the driver never
+    // does — which is how this shipped.
     const { rowCount } = await this.q.query(
       `update public.gsc_accounts
-          set property = $3, all_properties = ($3 is null), updated_at = now()
+          set property = $3::text, all_properties = ($3::text is null), updated_at = now()
         where id = $1 and user_id = $2 and deleted_at is null`,
       [accountId, userId, property],
     );
