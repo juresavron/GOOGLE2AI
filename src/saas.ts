@@ -17,7 +17,7 @@ import type { Config } from './env.ts';
 import { banner, chip, emptyState, esc, page, pageHeader, panel, stat, stats, table, type State } from './html.ts';
 import { mountMcp } from './mcp.ts';
 import { mountPages } from './pages.ts';
-import { seal } from './secrets.ts';
+import { CryptoError, seal } from './secrets.ts';
 import { mintToken, Tenants, tokenHash } from './tenants.ts';
 
 export interface SaasDeps {
@@ -582,11 +582,23 @@ export function mountSaas(app: Express, d: SaasDeps): void {
       tenants.forget(account.id);
       done('/app?m=' + encodeURIComponent(grant.email ? `Connected as ${grant.email}. Now choose a property.` : 'Connected. Now choose a property.'));
     } catch (e) {
-      // OAuthError messages are written for the person reading them and carry no token; anything
-      // else is logged and generalised.
+      // OAuthError messages are written for the person reading them and carry no token, so they go
+      // through as-is.
       if (e instanceof OAuthError) return done('/app?e=' + encodeURIComponent(e.message));
-      log.error({ err: String(e) }, 'google consent failed');
-      done('/app?e=' + encodeURIComponent('Could not finish connecting to Google.'));
+
+      // Everything else is logged in full and reported by CLASS. "Could not finish connecting to
+      // Google" was the only thing a failure here said, which is true and useless: it sends the
+      // reader back to Google, where nothing is wrong, and the actual cause is a line in a log
+      // they may not have. Naming the class costs nothing and leaks nothing — none of these
+      // strings carries a token, a property or a database detail.
+      log.error({ err: e instanceof Error ? e.stack : String(e) }, 'google consent failed');
+
+      if (e instanceof CryptoError) {
+        // MASTER_KEY is wrong or malformed. The tenant cannot fix it and re-consenting will not
+        // help, so do not send them round the loop again.
+        return done('/app?e=' + encodeURIComponent('Connected to Google, but this server could not seal the credential — its MASTER_KEY is missing or malformed. The operator has to fix that; trying again will not help.'));
+      }
+      done('/app?e=' + encodeURIComponent('Google authorised it, but saving the connection failed — most likely the database. Try again; if it keeps happening, the server log has the reason.'));
     }
   });
 }
