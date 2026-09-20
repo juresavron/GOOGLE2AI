@@ -9,9 +9,9 @@ services:
       # Stateless: there is no volume here and nothing to back up. Everything the server needs is in
       # .env, and everything it knows comes from Google.
       HOST: 0.0.0.0
-      PORT: 8000
+      PORT: 8080
     expose:
-      - '8000'
+      - '8080'
 
   caddy:
     image: caddy:2

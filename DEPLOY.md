@@ -169,5 +169,5 @@ docker compose up -d --build
 curl https://gsc.example.com/healthz
 ```
 
-Caddy gets the certificate on first request. Never expose port 8000 directly — the secret in the URL
+Caddy gets the certificate on first request. Never expose port 8080 directly — the secret in the URL
 is a bearer credential and plain HTTP puts it in every intermediary's logs.

@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { authKind, configFromEnv, loadDotenv, type Config } from '../src/env.ts';
 
 const withEnv = <T>(vars: Record<string, string | undefined>, fn: () => T): T => {
@@ -88,4 +89,48 @@ test('values that are only whitespace count as unset', () => {
   const cfg: Config = withEnv({ ...CLEAN, GSC_DEFAULT_SITE: '   ', GOOGLE_QUOTA_PROJECT: ' ' }, () => configFromEnv());
   assert.equal(cfg.defaultSite, '');
   assert.equal(cfg.quotaProject, '');
+});
+
+
+// ------------------------------------------------------------------ port agreement
+//
+// A deploy failed on exactly this: Fly's launcher rewrote fly.toml's internal_port to 8080 while
+// leaving PORT at 8000, so the app listened on one port and Fly's proxy knocked on the other. Every
+// health check reported "Request failed" while the container was perfectly healthy, and nothing in
+// the logs said why — the app had no idea anyone was knocking.
+//
+// Four files have to agree about the port and none of them imports another, so nothing but a test
+// can hold them together.
+
+const ROOT = path.dirname(fileURLToPath(import.meta.url)).replace(/\/tests$/, '');
+const read = (f: string) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+
+test('fly.toml, the Dockerfile and the config default all name the same port', () => {
+  const fly = read('fly.toml');
+  const dockerfile = read('Dockerfile');
+
+  const internal = /internal_port\s*=\s*(\d+)/.exec(fly)?.[1];
+  const flyEnv = /^\s*PORT\s*=\s*'(\d+)'/m.exec(fly)?.[1];
+  const dockerEnv = /PORT=(\d+)/.exec(dockerfile)?.[1];
+  const expose = /EXPOSE\s+(\d+)/.exec(dockerfile)?.[1];
+  const healthcheck = /process\.env\.PORT\|\|(\d+)/.exec(dockerfile)?.[1];
+
+  assert.ok(internal && flyEnv && dockerEnv && expose && healthcheck, 'every port must be findable');
+  // internal_port is where Fly's proxy connects; PORT is where the app listens. They are not the
+  // same setting and nothing makes them agree except this.
+  assert.equal(internal, flyEnv, "fly.toml's internal_port must match its own PORT");
+  assert.equal(dockerEnv, flyEnv, 'the image default must match fly.toml');
+  assert.equal(expose, flyEnv, 'EXPOSE must match');
+  assert.equal(healthcheck, flyEnv, "the image's own healthcheck must match");
+
+  // And the code's default, for a bare `node src/index.ts` with no environment at all.
+  const cfg = withEnv({ ...CLEAN, PORT: undefined }, () => configFromEnv());
+  assert.equal(String(cfg.port), flyEnv, 'configFromEnv default must match');
+});
+
+test('the self-hosted path proxies to the same port too', () => {
+  const flyEnv = /^\s*PORT\s*=\s*'(\d+)'/m.exec(read('fly.toml'))?.[1];
+  // Caddy fronts the container on a VPS. It fails the same silent way if it points elsewhere.
+  assert.match(read('Caddyfile'), new RegExp(`reverse_proxy google2ai:${flyEnv}`));
+  assert.match(read('docker-compose.yml'), new RegExp(`PORT: ${flyEnv}`));
 });

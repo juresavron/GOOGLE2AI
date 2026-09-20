@@ -13,7 +13,7 @@ primary_region = 'ams'
 
 [env]
   LOG_LEVEL = 'info'
-  PORT = '8000'
+  PORT = '8080'
   GSC_TZ = 'Europe/Ljubljana'
 
 # Set with `fly secrets set` rather than here, so nothing sensitive lives in the repo:
@@ -25,7 +25,10 @@ primary_region = 'ams'
 #   OPERATOR_NAME / OPERATOR_CONTACT / OPERATOR_LAW, ADMIN_EMAILS — stage 4
 
 [http_service]
-  internal_port = 8000
+  # 8080, matching PORT above. These two MUST agree: Fly's launcher rewrote this to 8080 while
+  # leaving PORT at 8000, so the app listened on one port and Fly's proxy knocked on the other —
+  # every health check failed with "Request failed" while the container itself was perfectly fine.
+  internal_port = 8080
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true

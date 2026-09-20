@@ -87,7 +87,7 @@ Node ≥ 22.18 (runs the TypeScript directly, no build step):
 
 ```bash
 npm install && cp .env.example .env && nano .env
-node src/index.ts            # http://0.0.0.0:8000/<MCP_SECRET>/mcp
+node src/index.ts            # http://0.0.0.0:8080/<MCP_SECRET>/mcp
 ```
 
 ## Authentication

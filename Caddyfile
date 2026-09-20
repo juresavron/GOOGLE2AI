@@ -2,6 +2,6 @@
 # used there — it is kept for a VPS, the way imap2ai and whatsapp2ai keep theirs.
 {$DOMAIN} {
 	encode gzip
-	reverse_proxy google2ai:8000
+	reverse_proxy google2ai:8080
 	tls {$ACME_EMAIL}
 }

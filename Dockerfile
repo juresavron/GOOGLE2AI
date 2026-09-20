@@ -5,7 +5,7 @@ WORKDIR /app
 ARG GIT_SHA=""
 
 ENV NODE_ENV=production \
-    HOST=0.0.0.0 PORT=8000 \
+    HOST=0.0.0.0 PORT=8080 \
     GIT_SHA=$GIT_SHA \
     NODE_OPTIONS=--disable-warning=ExperimentalWarning
 COPY package.json package-lock.json* ./
@@ -18,7 +18,7 @@ COPY src ./src
 # so it drops to an unprivileged user at build time and never needs to be root at all.
 USER node
 
-EXPOSE 8000
+EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8000)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
 CMD ["node", "src/index.ts"]

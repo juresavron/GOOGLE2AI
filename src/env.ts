@@ -111,7 +111,7 @@ export function configFromEnv(): Config {
   if (secretGenerated) secret = crypto.randomBytes(24).toString('base64url');
   return {
     host: process.env.HOST || '0.0.0.0',
-    port: Number(process.env.PORT || 8000),
+    port: Number(process.env.PORT || 8080),
     secret,
     secretGenerated,
 
