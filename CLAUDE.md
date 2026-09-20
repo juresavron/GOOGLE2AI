@@ -113,11 +113,19 @@ bypasses RLS, so those joins are the real enforcement for everything in this fil
 1. ✅ hosted MCP core over Streamable HTTP
 2. ✅ deploy pipeline and docs
 3. ✅ Postgres mirror (`db/002_mirror.sql`, `src/store.ts`)
-4. 🔧 multi-tenant SaaS — in: the schema, sealed credentials, `pg.ts`, `db.ts`, the **Google OAuth
-   consent flow** (`google-oauth.ts` — net-new; neither sibling has one, because their tenants hand
-   over a password and a Search Console tenant cannot), the tenant resolver (`tenants.ts`), Supabase
-   sign-in (`auth.ts`) and the dashboard (`saas.ts`) with `/c/<token>/mcp`. Remaining: legal pages,
-   the `ADMIN_EMAILS` operator panel, and Stripe subscriptions.
+4. ✅ multi-tenant SaaS — schema, sealed credentials, `pg.ts`, `db.ts`, the **Google OAuth consent
+   flow** (`google-oauth.ts` — net-new; neither sibling has one, because their tenants hand over a
+   password and a Search Console tenant cannot), the tenant resolver (`tenants.ts`), Supabase
+   sign-in (`auth.ts`), the dashboard, landing and legal pages (`saas.ts`, `pages.ts`), the
+   `ADMIN_EMAILS` operator panel, and `/c/<token>/mcp`.
+5. ⬜ Stripe subscriptions — the one thing both siblings have that this does not. Deliberately not
+   guessed at: it needs real prices and product ids, which are a business decision rather than a
+   port. `db/schema.sql` has no `subscriptions` table yet for the same reason.
+
+**Never run live:** sign-in and the Google consent have no end-to-end coverage, because CI has
+neither a Postgres nor an OAuth client. `tests/saas.test.ts` proves the surface mounts and degrades
+correctly with the database unreachable; it cannot prove a consent completes. The first real
+sign-in is still a first.
 
 ## The mirror
 

@@ -107,6 +107,37 @@ One-time setup, and the first step is not optional:
 
 ---
 
+## Running it for other people
+
+Everything above gives you the single-account server. To add sign-in, a dashboard and per-tenant
+connector URLs, read **[SAAS.md](SAAS.md)** first — it covers what you are taking on — then:
+
+1. **A Supabase project of its own.** Not imap2ai's or whatsapp2ai's: `db/schema.sql` refuses to run
+   on either, because `mcp_tokens` and `mcp_calls` exist in all three and the collision is silent.
+2. Apply `db/schema.sql`, then `db/002_mirror.sql`, in the SQL editor.
+3. Set the rest:
+
+```bash
+fly secrets set   SUPABASE_URL="https://<ref>.supabase.co"   SUPABASE_ANON_KEY="sb_publishable_..."   DATABASE_URL="postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres"   MASTER_KEY="$(node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))")"   PUBLIC_ORIGIN="https://google2ai.fly.dev"   OPERATOR_NAME="..." OPERATOR_CONTACT="..." OPERATOR_LAW="..."   ADMIN_EMAILS="you@example.com" -a google2ai
+```
+
+**`DATABASE_URL` must be the Session pooler string**, not `db.<ref>.supabase.co`. The direct host
+publishes only an AAAA record and Fly has no public IPv6 egress, so it is unreachable there and
+fails as `ENETUNREACH`, which names nothing. The pooler username carries the project ref
+(`postgres.<ref>`) and the port is 5432, not 6543 — 6543 is the transaction pooler, and this server
+holds a pool. `validateDatabaseUrl()` checks all three before a socket is opened.
+
+4. Add `<PUBLIC_ORIGIN>/oauth/google/callback` to the OAuth client's authorised redirect URIs. It
+   must match **exactly**, including the scheme and any trailing slash.
+5. **Publish the OAuth consent screen.** In Testing, Google expires every tenant's refresh token
+   after 7 days.
+
+`curl https://google2ai.fly.dev/status` should then report `"multi_tenant": "ready"`. If it says
+`database-unavailable`, the reason is in `fly logs` — `diagnose()` turns the driver's error into the
+thing to actually go and do.
+
+---
+
 ## Troubleshooting
 
 **`403` and a message about a quota project.** User credentials must name a project to bill. Set

@@ -16,7 +16,7 @@ were added by mistake.
 
 | tool | what it does |
 |---|---|
-| `status()` | which credentials are in use, whether Google accepts them, how many properties are visible |
+| `status()` | which credentials are in use, whether Google accepts them, how many properties are visible, and how far back the mirror reaches |
 | `list_sites()` | every property these credentials can read, with the permission level on each |
 | `search_analytics(siteUrl, startDate, endDate, dimensions, rowLimit, searchType, …filters)` | clicks, impressions, CTR and position, grouped by query / page / country / device / date |
 | `compare_periods(siteUrl, days, endDate, dimensions, rowLimit, …filters)` | the same metrics over two consecutive windows, with the change on every row |
@@ -99,6 +99,37 @@ With OAuth, `GOOGLE_QUOTA_PROJECT` is **required** — user credentials must nam
 Search Console answers `403 PERMISSION_DENIED` with a message that reads like a permissions problem.
 `/<MCP_SECRET>/setup` is a checklist that names whichever of these is missing.
 
+## Two shapes, one codebase
+
+**One account, yours.** Set `MCP_SECRET` and the Google variables, put
+`https://host/<MCP_SECRET>/mcp` into Claude. No sign-in, no database, nothing to visit but a setup
+checklist at `/<MCP_SECRET>/setup`. This is the whole product for a person who wants their own
+Search Console in Claude.
+
+**Several accounts, with sign-in.** Set `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `DATABASE_URL`,
+`MASTER_KEY` and `PUBLIC_ORIGIN` as well, and the same server also serves a landing page, sign-in,
+and a dashboard where somebody connects their own Google account, picks a property and gets a
+revocable connector URL of their own — plus `/privacy`, `/terms` and an `ADMIN_EMAILS`-gated
+operator panel. Accounts live in Postgres; each tenant's refresh token is sealed under `MASTER_KEY`.
+Read [SAAS.md](SAAS.md) before running this for other people.
+
+The tenant build **refuses to start without `MASTER_KEY`**, because starting would mean storing
+every tenant's Google credential in the clear.
+
+## The mirror
+
+On the multi-account build, the server backfills Search Console into Postgres every fifteen minutes.
+That is not primarily a cache:
+
+**Google deletes the history.** Search Console keeps sixteen months and then the data is gone — not
+archived, gone. A site running three years cannot ask "how did last spring compare to the one
+before" from Google at all, and never will be able to. Every day the mirror runs is a day of history
+that outlives that window.
+
+It answers a range only when *every* day in it has been fetched *and* settled, and only for an
+unfiltered web query. Anything else falls through to Google, and `search_analytics` always says
+which of the two answered. Set `GSC_MIRROR=off` if you would rather not store it.
+
 ## Endpoints
 
 | path | who can read it |
@@ -107,6 +138,10 @@ Search Console answers `403 PERMISSION_DENIED` with a message that reads like a 
 | `GET /status` | anyone — version, commit, auth kind, counts. **No property names, no error text** |
 | `GET /<MCP_SECRET>/setup` | whoever holds the secret — the configuration checklist |
 | `POST /<MCP_SECRET>/mcp` | whoever holds the secret — the connector |
+| `GET /`, `/login`, `/privacy`, `/terms` | anyone — multi-account build only |
+| `GET /app` | a signed-in tenant — their own accounts only |
+| `GET /app/operator` | an `ADMIN_EMAILS` address — every account. 404 for anyone else |
+| `POST /c/<token>/mcp` | whoever holds that tenant's connector URL |
 
 `/status` is deliberately dull: a property name is a customer's domain and the error strings quote
 it, so both are kept off the one endpoint a stranger can read. The deploy asserts their absence on
