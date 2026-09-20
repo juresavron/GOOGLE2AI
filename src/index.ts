@@ -13,7 +13,7 @@ import pino from 'pino';
 import { authKind, configFromEnv, loadDotenv } from './env.ts';
 import { GoogleGSC, MockGSC } from './gsc.ts';
 import type { GSC } from './gsc.ts';
-import { APP_JS, esc, page, SECURITY_HEADERS } from './html.ts';
+import { APP_JS, chip, esc, page, pageHeader, panel, SECURITY_HEADERS, table, type State } from './html.ts';
 import { mountMcp } from './mcp.ts';
 import { LAG_DAYS, VERSION, type Ctx } from './tools.ts';
 
@@ -200,25 +200,83 @@ app.get('/:secret/setup', (req, res) => {
   }
   const st = gsc.status();
   const kind = authKind(cfg);
-  const row = (ok: boolean | null, label: string, detail: string) =>
-    `<tr><td style="padding:.4rem .8rem .4rem 0;font-size:1.1rem">${ok === null ? '·' : ok ? '✓' : '✗'}</td>` +
-    `<td style="padding:.4rem 0"><strong>${esc(label)}</strong><br><span style="color:#555">${detail}</span></td></tr>`;
 
-  const rows = [
-    row(!cfg.secretGenerated, 'MCP_SECRET', cfg.secretGenerated ? 'Not set — a random one was generated for this run, so the connector URL changes on every restart.' : 'Set. The connector URL is this page with <code>/setup</code> replaced by <code>/mcp</code>.'),
-    row(kind !== 'adc', 'Google credentials', kind === 'oauth' ? 'OAuth refresh token — the supported path for a hosted deployment.' : kind === 'inline' ? 'Service account key from GOOGLE_CREDENTIALS_JSON.' : kind === 'file' ? `Service account key file at <code>${esc(cfg.credentialsFile)}</code>.` : 'None set. Falling back to gcloud Application Default Credentials, which do not exist on a container — set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN.'),
-    row(kind !== 'oauth' || Boolean(cfg.quotaProject), 'Quota project', cfg.quotaProject ? `<code>${esc(cfg.quotaProject)}</code>` : kind === 'oauth' ? 'Not set, and user credentials require one — Search Console answers 403 without it. Set GOOGLE_QUOTA_PROJECT.' : 'Not needed with a service account key, which bills its own project.'),
-    row(st.error ? false : st.ready ? true : null, 'Google answered', st.error ? esc(st.error) : st.ready ? `Yes — ${st.sites ?? 0} propert${st.sites === 1 ? 'y' : 'ies'} visible.` : 'Not called yet.'),
-    row(cfg.defaultSite ? true : null, 'Default property', cfg.defaultSite ? `<code>${esc(cfg.defaultSite)}</code>` : 'None. Tools require an explicit siteUrl; set GSC_DEFAULT_SITE to bind this connector to one property.'),
-  ].join('');
+  /** A checklist row: the state, what it is, and what to do about it. */
+  const row = (state: State, label: string, detail: string): string[] => [
+    `<span class="lead">${esc(label)}</span>`,
+    chip(state, state === 'ok' ? 'set' : state === 'danger' ? 'missing' : state === 'pending' ? 'check' : 'n/a'),
+    `<span class="meta">${detail}</span>`,
+  ];
+
+  const rows: string[][] = [
+    row(
+      cfg.secretGenerated ? 'danger' : 'ok',
+      'MCP_SECRET',
+      cfg.secretGenerated
+        ? 'Not set — a random one was generated for this run, so the connector URL changes on every restart.'
+        : 'Set. The connector URL is this page with <code>/setup</code> replaced by <code>/mcp</code>.',
+    ),
+    row(
+      kind === 'adc' ? 'danger' : 'ok',
+      'Google credentials',
+      kind === 'oauth'
+        ? 'OAuth refresh token — the supported path for a hosted deployment.'
+        : kind === 'inline'
+          ? 'Service account key from GOOGLE_CREDENTIALS_JSON.'
+          : kind === 'file'
+            ? `Service account key file at <code>${esc(cfg.credentialsFile)}</code>.`
+            : 'None set. Falling back to gcloud Application Default Credentials, which do not exist on a container — set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN.',
+    ),
+    row(
+      kind !== 'oauth' ? 'info' : cfg.quotaProject ? 'ok' : 'danger',
+      'Quota project',
+      cfg.quotaProject
+        ? `<code>${esc(cfg.quotaProject)}</code>`
+        : kind === 'oauth'
+          ? 'Not set, and user credentials require one — Search Console answers 403 without it. Set GOOGLE_QUOTA_PROJECT.'
+          : 'Not needed with a service account key, which bills its own project.',
+    ),
+    row(
+      st.error ? 'danger' : st.ready ? 'ok' : 'pending',
+      'Google answered',
+      st.error ? esc(st.error) : st.ready ? `Yes — ${st.sites ?? 0} propert${st.sites === 1 ? 'y' : 'ies'} visible.` : 'Not called yet.',
+    ),
+    row(
+      cfg.defaultSite ? 'ok' : 'info',
+      'Default property',
+      cfg.defaultSite
+        ? `<code>${esc(cfg.defaultSite)}</code>`
+        : 'None. Tools need an explicit siteUrl; set GSC_DEFAULT_SITE to bind this connector to one property.',
+    ),
+    row(
+      cfg.allowWrite ? 'pending' : 'ok',
+      'Writing',
+      cfg.allowWrite
+        ? 'ENABLED. submit_sitemap, delete_sitemap, add_property, remove_property and request_indexing will act.'
+        : 'Off. The write tools are registered and refuse, which is the right default.',
+    ),
+  ];
 
   res.type('html').send(
     page(
-      'GOOGLE2AI setup',
-      `<h1 style="margin:0 0 .25rem">GOOGLE2AI</h1>` +
-        `<p style="color:#555;margin:0 0 1.5rem">v${VERSION}${COMMIT ? ` · ${esc(COMMIT)}` : ''} · auth: ${esc(kind)}</p>` +
-        `<table style="border-collapse:collapse;width:100%">${rows}</table>` +
-        `<p style="margin-top:2rem;color:#555">Add it in claude.ai → Settings → Connectors → Add custom connector, with no OAuth. The secret in the URL is the credential, so treat the whole URL like a password.</p>`,
+      'Setup · GOOGLE2AI',
+      pageHeader({
+        title: 'GOOGLE2AI',
+        meta: `v${VERSION}${COMMIT ? ` · <code>${esc(COMMIT)}</code>` : ''} · auth: ${esc(kind)}`,
+      }) +
+        `<div class="stack" style="margin-top:1.25rem">` +
+        panel({
+          title: 'Configuration',
+          meta: 'Every failure this server has is a configuration failure, so this names which one.',
+          flush: true,
+          body: table([{ header: 'Setting' }, { header: 'State' }, { header: 'Detail' }], rows),
+        }) +
+        panel({
+          body: `<p class="meta">Add it in claude.ai → Settings → Connectors → Add custom connector, with no OAuth.
+                   The secret in the URL is the credential, so treat the whole URL like a password.</p>`,
+        }) +
+        `</div>`,
+      { tool: true, wide: true },
     ),
   );
 });
@@ -226,7 +284,17 @@ app.get('/:secret/setup', (req, res) => {
 // Only on the single-account build: with the tenant surface mounted, / is its landing page.
 if (!saasReady) {
   app.get('/', (_req, res) => {
-    res.type('html').send(page('GOOGLE2AI', `<h1>GOOGLE2AI</h1><p>A Model Context Protocol server for Google Search Console. The connector lives at a secret path; if you are the operator, you know it.</p>`));
+    res.type('html').send(
+      page(
+        'GOOGLE2AI',
+        `<div class="hero">
+           <h1>GOOGLE2AI</h1>
+           <p class="lede">A Model Context Protocol server for Google Search Console. The connector lives at a
+             secret path; if you are the operator, you know it.</p>
+         </div>`,
+        { description: 'A Model Context Protocol server for Google Search Console.' },
+      ),
+    );
   });
 }
 

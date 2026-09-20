@@ -76,7 +76,10 @@ test('the landing page renders without touching the database', async () => {
   const html = await res.text();
   assert.match(html, /GOOGLE2AI/);
   // It is the page a stranger sees; it must not depend on Postgres being up.
-  assert.match(html, /Reading by default/);
+  assert.match(html, /Get started/);
+  // The claim rather than the wording: the landing page must keep saying that writes exist and are
+  // off until you enable them. Copy gets rewritten; that promise should not vanish with it.
+  assert.match(html, /switched off until you turn them on/i);
 });
 
 test('the sign-in page renders, and the dashboard refuses without a session', async () => {

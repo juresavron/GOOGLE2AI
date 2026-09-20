@@ -14,7 +14,7 @@ import { Attempts, Auth, clearSession, COOKIE, OneShot, readCookie, setSession, 
 import type { Account, Db } from './db.ts';
 import { clearConsentCookie, consentCookie, CONSENT_COOKIE, GoogleOAuth, OAuthError, readCookie as readRawCookie } from './google-oauth.ts';
 import type { Config } from './env.ts';
-import { esc, page } from './html.ts';
+import { banner, chip, emptyState, esc, page, pageHeader, panel, stat, stats, table, type State } from './html.ts';
 import { mountMcp } from './mcp.ts';
 import { mountPages } from './pages.ts';
 import { seal } from './secrets.ts';
@@ -34,25 +34,16 @@ const MAX_ACCOUNTS = Number(process.env.MAX_ACCOUNTS_PER_USER || 5);
 
 // ---------------------------------------------------------------- small page pieces
 
-const S = {
-  card: 'border:1px solid #e3e3e3;border-radius:10px;padding:1.1rem 1.25rem;margin:0 0 1rem',
-  input: 'width:100%;padding:.55rem .7rem;border:1px solid #ccc;border-radius:7px;font:inherit;box-sizing:border-box',
-  btn: 'padding:.55rem 1rem;border:0;border-radius:7px;background:#1a1a1a;color:#fff;font:inherit;cursor:pointer',
-  ghost: 'padding:.4rem .8rem;border:1px solid #ccc;border-radius:7px;background:#fff;font:inherit;cursor:pointer',
-  muted: 'color:#666;font-size:.9rem',
-  code: 'font:13px ui-monospace,SFMono-Regular,Menlo,monospace;background:#f5f5f5;padding:.6rem .7rem;border-radius:7px;word-break:break-all;display:block',
-};
+/** A blocking state, once per screen. Anything quieter is a line of quiet text (rule 7 in html.ts). */
+const notice = (text: string, bad = false) => (text ? banner(bad ? 'danger' : 'info', esc(text)) : '');
 
-const notice = (text: string, bad = false) =>
-  text ? `<p style="${S.card};background:${bad ? '#fff5f5' : '#f4faf4'};border-color:${bad ? '#f0c6c6' : '#c6e0c6'}">${esc(text)}</p>` : '';
-
-/** Status as a word a person can act on, not the enum. */
-const statusLine = (a: Account): string => {
-  if (a.status === 'pending') return 'Not connected yet';
-  if (a.status === 'revoked') return 'Google withdrew this connection — reconnect';
-  if (a.status === 'failing') return 'Google is refusing this connection';
-  if (!a.property) return 'Connected, but no property chosen';
-  return 'Ready';
+/** Status as a word a person can act on, plus the chip colour that word deserves. */
+const accountState = (a: Account): { state: State; label: string } => {
+  if (a.status === 'pending') return { state: 'pending', label: 'Not connected' };
+  if (a.status === 'revoked') return { state: 'danger', label: 'Google withdrew access' };
+  if (a.status === 'failing') return { state: 'danger', label: 'Google is refusing' };
+  if (!a.property) return { state: 'pending', label: 'No property chosen' };
+  return { state: 'ok', label: 'Ready' };
 };
 
 // ---------------------------------------------------------------- routes
@@ -115,12 +106,49 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     if (await userOf(req).catch(() => null)) return redirect(res, '/app');
     res.type('html').send(
       page(
-        'GOOGLE2AI',
-        `<h1>GOOGLE2AI</h1>
-         <p>Your Google Search Console, in Claude. Ask what people searched for, which pages are gaining or losing, and why a page is not indexed — in the conversation, not in a dashboard.</p>
-         <p style="${S.muted}">Reading by default. Sitemap and property changes are possible, but switched off until you turn them on for a connection.</p>
-         <p><a style="${S.btn};text-decoration:none;display:inline-block" href="/login">Sign in</a></p>
-         <p style="${S.muted}"><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></p>`,
+        'GOOGLE2AI — your Search Console, in Claude',
+        `<div class="hero">
+           <h1>Your Search Console, in Claude</h1>
+           <p class="lede">Ask what people searched for, which pages are gaining or losing, and why a page is not
+             indexed — in the conversation, not in a dashboard.</p>
+           <div class="btnrow"><a class="button" href="/login">Get started</a></div>
+         </div>
+
+         <div class="cols">
+           <div class="card">
+             <h2>What you can ask</h2>
+             <div class="prose">
+               <ul>
+                 <li>Top queries and pages for any range</li>
+                 <li>This month against last, with the change on every row</li>
+                 <li>Why one URL is not indexed, and which canonical Google chose</li>
+                 <li>Whether your sitemaps are actually being read</li>
+               </ul>
+             </div>
+           </div>
+           <div class="card">
+             <h2>What it does with your data</h2>
+             <div class="prose">
+               <p>Nothing is copied here. Every answer is fetched from Google when you ask and passed
+                 straight back.</p>
+               <p>Reading is what it does by default. Sitemap and property changes are possible, and
+                 switched off until you turn them on for a connection.</p>
+             </div>
+           </div>
+         </div>
+
+         <div class="card">
+           <h2>Three steps</h2>
+           <ol class="steps">
+             <li>Create an account and connect Google — you choose which property.</li>
+             <li>Get a connector URL. It is shown once, and you can revoke it at any time.</li>
+             <li>Paste it into Claude as a custom connector. That is the whole setup.</li>
+           </ol>
+         </div>`,
+        {
+          description: 'Read your Google Search Console from Claude over the Model Context Protocol.',
+          footer: '<a href="/privacy">Privacy</a> · <a href="/terms">Terms</a>',
+        },
       ),
     );
   });
@@ -130,23 +158,36 @@ export function mountSaas(app: Express, d: SaasDeps): void {
   app.get('/login', async (req, res) => {
     if (await userOf(req)) return redirect(res, '/app');
     const err = typeof req.query.e === 'string' ? req.query.e : '';
+    const msg = typeof req.query.m === 'string' ? req.query.m : '';
+
+    /**
+     * ONE set of fields, two submit buttons.
+     *
+     * This was two stacked forms, each with its own Email and Password labelled identically and
+     * nothing saying which one a new person wanted. `formaction` on the second button posts the
+     * same fields to /signup instead — no JavaScript, no tab state, and no second copy of the
+     * inputs to keep in sync.
+     */
     res.type('html').send(
       page(
         'Sign in · GOOGLE2AI',
-        `<h1>GOOGLE2AI</h1><p style="${S.muted}">Your Google Search Console, in Claude.</p>` +
+        `<h1>GOOGLE2AI</h1>
+         <p class="muted" style="margin:0 0 1.25rem">Your Google Search Console, in Claude.</p>` +
+          notice(msg) +
           notice(err, true) +
-          `<form method="post" action="/login" style="${S.card}">
-             <p><label>Email<br><input style="${S.input}" type="email" name="email" autocomplete="email" required></label></p>
-             <p><label>Password<br><input style="${S.input}" type="password" name="password" autocomplete="current-password" required></label></p>
-             <p><button style="${S.btn}" type="submit">Sign in</button></p>
+          `<form method="post" action="/login" class="card">
+             <label for="email">Email</label>
+             <input id="email" type="email" name="email" autocomplete="email" autofocus required>
+             <label for="password">Password</label>
+             <input id="password" type="password" name="password" autocomplete="current-password" minlength="8" required>
+             <p class="muted" style="margin:.375rem 0 1rem">At least 8 characters.</p>
+             <div class="btnrow" style="margin:0">
+               <button type="submit">Sign in</button>
+               <button class="ghost" type="submit" formaction="/signup">Create account</button>
+             </div>
            </form>
-           <form method="post" action="/signup" style="${S.card}">
-             <p style="${S.muted}">No account yet? Use the same fields to create one.</p>
-             <p><label>Email<br><input style="${S.input}" type="email" name="email" autocomplete="email" required></label></p>
-             <p><label>Password<br><input style="${S.input}" type="password" name="password" autocomplete="new-password" minlength="8" required></label></p>
-             <p><button style="${S.ghost}" type="submit">Create account</button></p>
-           </form>
-           <p style="${S.muted}"><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></p>`,
+           <p class="muted">New here? Fill both fields in and press <strong>Create account</strong>.</p>`,
+        { narrow: true, footer: '<a href="/privacy">Privacy</a> · <a href="/terms">Terms</a>' },
       ),
     );
   });
@@ -161,7 +202,15 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     if (attempts.tooMany(who)) return redirect(res, '/login?e=' + encodeURIComponent('Too many attempts. Wait a few minutes.'));
 
     const r = kind === 'signIn' ? await auth.signIn(email, password) : await auth.signUp(email, password);
-    if (!r.ok) return redirect(res, '/login?e=' + encodeURIComponent(r.error));
+    if (!r.ok) {
+      // Supabase answers "For security purposes, you can only request this after N seconds" when
+      // its built-in SMTP is rate-limited, which reads as though the PASSWORD were the problem.
+      // Naming the real cause saves the next person the twenty minutes it cost this one.
+      const hint = /only request this after/i.test(r.error)
+        ? `${r.error} — that is the email rate limit on the Supabase project, not your password. Turning off Authentication → Email → "Confirm email" removes it.`
+        : r.error;
+      return redirect(res, '/login?e=' + encodeURIComponent(hint));
+    }
 
     attempts.clear(who);
     setSession(res, r.accessToken, r.expiresIn, secure(req));
@@ -180,6 +229,17 @@ export function mountSaas(app: Express, d: SaasDeps): void {
 
   // ---------------------------------------------------------------- dashboard
 
+  /** The one piece of chrome every signed-in page carries: who you are, and the way out. */
+  const topbar = (user: SessionUser, admin: boolean) =>
+    `<div class="topbar">
+       <a class="brand" href="/app">GOOGLE2AI</a>
+       <div class="acts">
+         <span class="who">${esc(user.email)}</span>
+         ${admin ? `<a class="btn" href="/app/operator">Operator</a>` : ''}
+         <form method="post" action="/logout" class="rowform"><button type="submit">Sign out</button></form>
+       </div>
+     </div>`;
+
   app.get('/app', async (req, res) => {
     const user = await guard(req, res);
     if (!user) return;
@@ -188,13 +248,9 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     const msg = typeof req.query.m === 'string' ? req.query.m : '';
     const err = typeof req.query.e === 'string' ? req.query.e : '';
 
-    // The plaintext connector URL, carried across a redirect exactly once. It is never in the URL,
-    // in history or in a log — see OneShot in auth.ts for what that fixed.
+    // The plaintext connector URL, carried across a redirect exactly once. Never in the URL, in
+    // history or in a log — see OneShot in auth.ts for what that fixed.
     const fresh = typeof req.query.t === 'string' ? oneShot.take(user.id, req.query.t) : null;
-    // PUBLIC_ORIGIN first, and the request's host only as a fallback for local development. The
-    // Host header is attacker-controlled, and this line renders a URL carrying a live connector
-    // token for the user to copy into Claude — a forged host would have them paste their own
-    // credential into somebody else's server. Same reason the OAuth redirect is built from config.
     const base = (process.env.PUBLIC_ORIGIN || '').replace(/\/+$/, '') || `${secure(req) ? 'https' : 'http'}://${req.get('host')}`;
 
     const cards = accounts.length
@@ -203,68 +259,104 @@ export function mountSaas(app: Express, d: SaasDeps): void {
             accounts.map(async (a) => {
               const tokens = (await db.listTokens(user.id, a.id)).filter((t) => !t.revoked_at);
               const sites = a.status === 'connected' && !a.property ? await sitesFor(a).catch(() => []) : [];
-              return (
-                `<div style="${S.card}">
-                   <div style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap">
-                     <strong>${esc(a.label)}</strong><span style="${S.muted}">${esc(statusLine(a))}</span>
-                   </div>
-                   <p style="${S.muted};margin:.4rem 0 0">${a.google_email ? esc(a.google_email) : 'no Google account yet'}${a.property ? ` · ${esc(a.property)}` : ''}</p>` +
-                (a.status === 'pending' || a.status === 'revoked'
-                  ? `<p><a style="${S.btn};text-decoration:none;display:inline-block" href="/oauth/google/start?account=${encodeURIComponent(a.id)}">${a.status === 'revoked' ? 'Reconnect' : 'Connect'} Google</a></p>`
-                  : '') +
-                (a.status === 'connected' && !a.property
-                  ? sites.length
-                    ? `<form method="post" action="/app/accounts/${encodeURIComponent(a.id)}/property">
-                         <p><label>Which property?<br><select name="property" style="${S.input}">${sites.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}</select></label></p>
-                         <p><button style="${S.btn}" type="submit">Use this one</button></p>
+              const st = accountState(a);
+              const id = encodeURIComponent(a.id);
+
+              const body: string[] = [];
+
+              if (a.status === 'pending' || a.status === 'revoked') {
+                body.push(
+                  `<p class="meta">${a.status === 'revoked'
+                    ? 'Google has withdrawn this connection. Reconnecting keeps the same connector URLs working.'
+                    : 'This account has not been connected to Google yet.'}</p>
+                   <div class="acts"><a class="btn primary" href="/oauth/google/start?account=${id}">${a.status === 'revoked' ? 'Reconnect' : 'Connect'} Google</a></div>`,
+                );
+              }
+
+              if (a.status === 'connected' && !a.property) {
+                body.push(
+                  sites.length
+                    ? `<form method="post" action="/app/accounts/${id}/property">
+                         <label for="p-${id}">Which property?</label>
+                         <select id="p-${id}" name="property">${sites.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('')}</select>
+                         <div class="acts" style="margin-top:.625rem"><button class="primary" type="submit">Use this one</button></div>
                        </form>`
-                    : `<p style="${S.muted}">No properties are visible to ${esc(a.google_email ?? 'this account')}. That usually means the consent was given as a different Google account than the one that owns the property.</p>`
-                  : '') +
-                (a.property
-                  ? `<p style="${S.muted}">${tokens.length} connector URL${tokens.length === 1 ? '' : 's'} · writing is ${a.allow_write ? '<strong>on</strong>' : 'off'}${a.allow_write && !cfg.allowWrite ? ' for this account, but off server-wide' : ''}</p>
-                     <form method="post" action="/app/accounts/${encodeURIComponent(a.id)}/tokens" style="display:inline">
-                       <button style="${S.ghost}" type="submit">New connector URL</button>
-                     </form>
-                     <form method="post" action="/app/accounts/${encodeURIComponent(a.id)}/write" style="display:inline"
-                           data-confirm="${a.allow_write ? `Stop ${esc(a.label)} writing?` : `Let ${esc(a.label)} submit and delete sitemaps, add and remove properties? Removing a property is not undone by re-adding it.`}">
-                       <input type="hidden" name="allow" value="${a.allow_write ? '0' : '1'}">
-                       <button style="${S.ghost}" type="submit">${a.allow_write ? 'Stop writing' : 'Allow writing'}</button>
-                     </form>`
-                  : '') +
-                ` <form method="post" action="/app/accounts/${encodeURIComponent(a.id)}/delete" style="display:inline" data-confirm="Delete ${esc(a.label)}? This revokes the Google grant and every connector URL.">
-                     <button style="${S.ghost}" type="submit">Delete</button>
-                   </form>
-                 </div>`
-              );
+                    : `<p class="meta">No properties are visible to ${esc(a.google_email ?? 'this account')}. That usually means
+                         consent was given as a different Google account than the one that owns the property.</p>`,
+                );
+              }
+
+              if (a.property) {
+                body.push(
+                  `<div class="stats">
+                     ${stat({ label: 'Connector URLs', value: tokens.length })}
+                     ${stat({ label: 'Writing', value: a.allow_write ? 'On' : 'Off', state: a.allow_write ? 'pending' : 'info' })}
+                   </div>` +
+                    (a.allow_write && !cfg.allowWrite
+                      ? `<p class="micro">On for this account, but off server-wide — the tools will still refuse.</p>`
+                      : '') +
+                    `<div class="acts">
+                       <form method="post" action="/app/accounts/${id}/tokens" class="rowform"><button type="submit">New connector URL</button></form>
+                       <form method="post" action="/app/accounts/${id}/write" class="rowform"
+                             data-confirm="${a.allow_write ? `Stop ${esc(a.label)} writing?` : `Let ${esc(a.label)} submit and delete sitemaps, and add and remove properties? Removing a property is not undone by re-adding it.`}">
+                         <input type="hidden" name="allow" value="${a.allow_write ? '0' : '1'}">
+                         <button type="submit">${a.allow_write ? 'Stop writing' : 'Allow writing'}</button>
+                       </form>
+                     </div>`,
+                );
+              }
+
+              return panel({
+                title: a.label,
+                meta: `${chip(st.state, st.label)} ${a.google_email ? esc(a.google_email) : '<span class="muted">no Google account yet</span>'}${a.property ? ` · <code>${esc(a.property)}</code>` : ''}`,
+                action: `<form method="post" action="/app/accounts/${id}/delete" class="rowform"
+                           data-confirm="Delete ${esc(a.label)}? This revokes its Google grant and every connector URL.">
+                           <button class="danger" type="submit">Delete</button>
+                         </form>`,
+                body: body.join(''),
+              });
             }),
           )
         ).join('')
-      : `<p style="${S.muted}">Nothing connected yet.</p>`;
+      : panel({
+          body: emptyState({
+            title: 'Nothing connected yet',
+            meta: 'Add a Search Console property below, and connect the Google account that owns it.',
+          }),
+          flush: true,
+        });
 
     res.type('html').send(
       page(
-        'GOOGLE2AI',
-        `<div style="display:flex;justify-content:space-between;align-items:baseline">
-           <h1 style="margin:0">GOOGLE2AI</h1>
-           <form method="post" action="/logout"><button style="${S.ghost}" type="submit">Sign out</button></form>
-         </div>
-         <p style="${S.muted}">${esc(user.email)}${isAdmin(user) ? ` · <a href="/app/operator">operator</a>` : ''}</p>` +
+        'Dashboard · GOOGLE2AI',
+        topbar(user, isAdmin(user)) +
+          pageHeader({ title: 'Your connections', meta: `${accounts.length} of ${MAX_ACCOUNTS}` }) +
+          `<div class="stack" style="margin-top:1.25rem">` +
           notice(msg) +
           notice(err, true) +
           (fresh
-            ? `<div style="${S.card};background:#f4faf4;border-color:#c6e0c6">
-                 <strong>Your connector URL — shown once</strong>
-                 <p style="${S.muted}">Only its hash is stored, so this cannot be shown again. Add it in claude.ai → Settings → Connectors → Add custom connector, with no OAuth. Treat it like a password.</p>
-                 <code style="${S.code}">${esc(`${base}/c/${fresh}/mcp`)}</code>
-               </div>`
+            ? panel({
+                title: 'Your connector URL',
+                meta: 'Shown once — only its hash is stored.',
+                body: `<pre class="jsonbox">${esc(`${base}/c/${fresh}/mcp`)}</pre>
+                       <p class="meta">Add it in claude.ai → Settings → Connectors → Add custom connector, with no OAuth.
+                          Treat the whole URL like a password; revoke it here if it leaks.</p>`,
+              })
             : '') +
           cards +
           (accounts.length < MAX_ACCOUNTS
-            ? `<form method="post" action="/app/accounts" style="${S.card}">
-                 <p><label>Add a Search Console property<br><input style="${S.input}" name="label" placeholder="e.g. Ocenagor" maxlength="80" required></label></p>
-                 <p><button style="${S.btn}" type="submit">Continue to Google</button></p>
-               </form>`
-            : `<p style="${S.muted}">That is the maximum of ${MAX_ACCOUNTS} for one account.</p>`),
+            ? panel({
+                title: 'Add a property',
+                body: `<form method="post" action="/app/accounts">
+                         <label for="label">Name it</label>
+                         <input id="label" name="label" placeholder="e.g. Ocenagor" maxlength="80" required>
+                         <p class="meta" style="margin:.375rem 0 .75rem">Your own name for this connection — you pick the Search Console property next.</p>
+                         <div class="acts"><button class="primary" type="submit">Continue to Google</button></div>
+                       </form>`,
+              })
+            : panel({ body: `<p class="meta">That is the maximum of ${MAX_ACCOUNTS} connections for one account.</p>` })) +
+          `</div>`,
+        { tool: true, footer: '<a href="/privacy">Privacy</a> · <a href="/terms">Terms</a>' },
       ),
     );
 
@@ -276,7 +368,7 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     async function sitesFor(a: Account): Promise<string[]> {
       const client = await tenants.clientFor(a);
       if (!client) return [];
-      return (await client.listSites()).map((s) => s.siteUrl);
+      return (await client.listSites()).map((x) => x.siteUrl);
     }
   });
 
@@ -379,49 +471,57 @@ export function mountSaas(app: Express, d: SaasDeps): void {
 
     const [totals, accounts, errors] = await Promise.all([db.totals(), db.allAccounts(), db.errorBreakdown()]);
 
-    const stat = (label: string, value: string | number) =>
-      `<div style="border:1px solid #e3e3e3;border-radius:10px;padding:.7rem .9rem;min-width:7rem">
-         <div style="font-size:1.5rem;line-height:1.2">${esc(value)}</div><div style="${S.muted}">${esc(label)}</div>
-       </div>`;
-
-    const rows = accounts
-      .map(
-        (a) =>
-          `<tr style="border-top:1px solid #eee">
-             <td style="padding:.45rem .6rem .45rem 0">${esc(a.label)}</td>
-             <td style="padding:.45rem .6rem">${esc(a.google_email ?? '—')}</td>
-             <td style="padding:.45rem .6rem">${esc(a.property ?? '—')}</td>
-             <td style="padding:.45rem .6rem">${esc(a.status)}</td>
-             <td style="padding:.45rem .6rem;text-align:right">${a.tokens}</td>
-             <td style="padding:.45rem .6rem;text-align:right">${a.calls_24h}</td>
-             <td style="padding:.45rem 0;color:#8a1f1f;font-size:.85rem">${esc(a.last_error ?? '')}</td>
-           </tr>`,
-      )
-      .join('');
+    const rows = accounts.map((a) => {
+      const st = accountState(a);
+      return [
+        `<span class="lead">${esc(a.label)}</span><div class="micro">${esc(a.google_email ?? '—')}</div>`,
+        a.property ? `<code>${esc(a.property)}</code>` : '<span class="muted">—</span>',
+        chip(st.state, st.label) + (a.allow_write ? ' ' + chip('pending', 'writes') : ''),
+        String(a.tokens),
+        String(a.calls_24h),
+        // last_error is operator-facing and can quote the property. It is why this panel exists —
+        // the tenant dashboard deliberately cannot show it.
+        a.last_error ? `<span class="micro" style="color:hsl(var(--error-700))">${esc(a.last_error)}</span>` : '',
+      ];
+    });
 
     res.type('html').send(
       page(
         'Operator · GOOGLE2AI',
-        `<div style="display:flex;justify-content:space-between;align-items:baseline">
-           <h1 style="margin:0">Operator</h1><a href="/app" style="${S.muted}">back to dashboard</a>
-         </div>
-         <div style="display:flex;gap:.6rem;flex-wrap:wrap;margin:1rem 0">
-           ${stat('accounts', totals.accounts)}${stat('connected', totals.connected)}${stat('connector URLs', totals.tokens)}
-           ${stat('calls 24h', totals.calls_24h)}${stat('errors 24h', totals.errors_24h)}
-         </div>
-         <table style="border-collapse:collapse;width:100%;font-size:.95rem">
-           <tr style="text-align:left;${S.muted}">
-             <th style="padding:0 .6rem .3rem 0">label</th><th style="padding:0 .6rem .3rem">google</th>
-             <th style="padding:0 .6rem .3rem">property</th><th style="padding:0 .6rem .3rem">status</th>
-             <th style="padding:0 .6rem .3rem;text-align:right">urls</th><th style="padding:0 .6rem .3rem;text-align:right">24h</th>
-             <th style="padding:0 0 .3rem">last error</th>
-           </tr>${rows || `<tr><td colspan="7" style="padding:.6rem 0;${S.muted}">No accounts yet.</td></tr>`}
-         </table>` +
+        topbar(user, true) +
+          pageHeader({ title: 'Operator', meta: 'Every account on this deployment', back: { href: '/app', label: 'Dashboard' } }) +
+          `<div class="stack" style="margin-top:1.25rem">` +
+          stats(
+            stat({ label: 'Accounts', value: totals.accounts }),
+            stat({ label: 'Connected', value: totals.connected, state: totals.connected === totals.accounts ? 'ok' : 'pending' }),
+            stat({ label: 'Connector URLs', value: totals.tokens }),
+            stat({ label: 'Calls 24h', value: totals.calls_24h }),
+            stat({ label: 'Errors 24h', value: totals.errors_24h, state: totals.errors_24h ? 'danger' : 'ok' }),
+          ) +
+          panel({
+            title: 'Accounts',
+            flush: true,
+            body: table(
+              [{ header: 'Account' }, { header: 'Property' }, { header: 'State' }, { header: 'URLs', num: true }, { header: '24h', num: true }, { header: 'Last error' }],
+              rows,
+              emptyState({ title: 'No accounts yet', meta: 'Nobody has signed up and connected a property.' }),
+            ),
+          }) +
           (errors.length
-            ? `<h2 style="font-size:1rem;margin:1.5rem 0 .5rem">Failures in the last 24 hours</h2>
-               <p style="${S.muted}">Codes only — a closed vocabulary, so this panel cannot become a second copy of anybody's search traffic.</p>
-               <ul>${errors.map((e) => `<li><code>${esc(e.error_code)}</code> &times; ${e.n}</li>`).join('')}</ul>`
-            : ''),
+            ? panel({
+                title: 'Failures in the last 24 hours',
+                // errorCode() is a closed vocabulary precisely so this panel can be useful without
+                // becoming a second copy of anybody's search traffic.
+                meta: 'Codes only — never an argument, a property or a search term.',
+                flush: true,
+                body: table(
+                  [{ header: 'Code' }, { header: 'Count', num: true }],
+                  errors.map((e) => [`<code>${esc(e.error_code)}</code>`, String(e.n)]),
+                ),
+              })
+            : '') +
+          `</div>`,
+        { tool: true, wide: true },
       ),
     );
   });

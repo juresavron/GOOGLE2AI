@@ -11,17 +11,21 @@
 // with their data. Same rule as imap2ai and whatsapp2ai, same reason.
 import type { Express } from 'express';
 import type { Config } from './env.ts';
-import { esc, page } from './html.ts';
-
-const MUTED = 'color:#666;font-size:.9rem';
-const WARN = 'border:1px solid #f0c6c6;background:#fff5f5;border-radius:10px;padding:1rem 1.25rem;color:#8a1f1f';
+import { banner, esc, page } from './html.ts';
 
 const operatorBlock = (cfg: Config): string => {
   const { name, contact, law } = cfg.operator;
   if (!name || !contact) {
-    return `<p style="${WARN}"><strong>This deployment has not said who runs it.</strong> Set OPERATOR_NAME, OPERATOR_CONTACT and OPERATOR_LAW. Until then this page cannot tell you who is responsible for your data, and you should not connect a Google account to it.</p>`;
+    // A blocking state, so it gets the one banner this page is allowed (rule 7 in html.ts).
+    return banner(
+      'danger',
+      `<strong>This deployment has not said who runs it.</strong> Set OPERATOR_NAME, OPERATOR_CONTACT and
+       OPERATOR_LAW. Until then this page cannot tell you who is responsible for your data, and you
+       should not connect a Google account to it.`,
+    );
   }
-  return `<p>This service is operated by <strong>${esc(name)}</strong>. Questions, requests and complaints: <strong>${esc(contact)}</strong>.${law ? ` Governed by the law of ${esc(law)}.` : ''}</p>`;
+  return `<div class="card"><p style="margin:0">This service is operated by <strong>${esc(name)}</strong>.
+    Questions, requests and complaints: <strong>${esc(contact)}</strong>.${law ? ` Governed by the law of ${esc(law)}.` : ''}</p></div>`;
 };
 
 export function mountPages(app: Express, cfg: Config): void {
@@ -31,7 +35,8 @@ export function mountPages(app: Express, cfg: Config): void {
         'Privacy · GOOGLE2AI',
         `<h1>Privacy</h1>` +
           operatorBlock(cfg) +
-          `<h2>What this service touches</h2>
+          `<div class="card prose">
+           <h2>What this service touches</h2>
            <p>When you connect a Google account, Google gives this service a token for the Search
            Console properties that account can already see. The scopes requested are
            <code>webmasters</code> and <code>indexing</code>.</p>
@@ -71,7 +76,9 @@ export function mountPages(app: Express, cfg: Config): void {
            asks Google to revoke the grant, after which the stored token is deleted. You can also
            revoke it yourself at <code>myaccount.google.com/permissions</code> at any time, which
            this service cannot prevent or undo.</p>
-           <p style="${MUTED}">Google's own handling of the data is covered by Google's privacy policy, not this one.</p>`,
+           <p class="muted">Google's own handling of the data is covered by Google's privacy policy, not this one.</p>
+           </div>`,
+        { description: 'What GOOGLE2AI reads, what it stores, and what it never copies.', footer: '<a href="/">Home</a> · <a href="/terms">Terms</a>' },
       ),
     );
   });
@@ -82,7 +89,8 @@ export function mountPages(app: Express, cfg: Config): void {
         'Terms · GOOGLE2AI',
         `<h1>Terms</h1>` +
           operatorBlock(cfg) +
-          `<h2>What it does</h2>
+          `<div class="card prose">
+           <h2>What it does</h2>
            <p>This service reads Google Search Console on your behalf and exposes it to an AI client
            over the Model Context Protocol. It can also make a small number of changes — submitting and
            removing sitemaps, adding and removing properties, and Indexing API notifications — but
@@ -109,7 +117,9 @@ export function mountPages(app: Express, cfg: Config): void {
            <h2>Ending it</h2>
            <p>Delete your connections at any time from the dashboard. The operator may suspend a
            connection that is abusing the API or putting the deployment's quota at risk, and will say
-           so at the contact address above.</p>`,
+           so at the contact address above.</p>
+           </div>`,
+        { description: 'The terms GOOGLE2AI is provided under.', footer: '<a href="/">Home</a> · <a href="/privacy">Privacy</a>' },
       ),
     );
   });
