@@ -70,6 +70,17 @@ export interface Config {
    */
   defaultSite: string;
 
+  /**
+   * Whether the write tools will actually act. FALSE BY DEFAULT, and the tools are registered
+   * either way so that a refusal can say how to turn it on.
+   *
+   * The same arrangement as whatsapp2ai's WA_ALLOW_SEND and imap2ai's MAIL_ALLOW_SEND, for the
+   * same reason: the read half of these connectors is safe to hand an agent, and the write half
+   * removes a sitemap or a whole property from Search Console. One of those is undone by asking
+   * again; the other is not.
+   */
+  allowWrite: boolean;
+
   tz: string;
   logLevel: string;
   mock: boolean;
@@ -112,6 +123,7 @@ export function configFromEnv(): Config {
     quotaProject: (process.env.GOOGLE_QUOTA_PROJECT || '').trim(),
 
     defaultSite: (process.env.GSC_DEFAULT_SITE || '').trim(),
+    allowWrite: bool(process.env.GSC_ALLOW_WRITE, false),
 
     tz: process.env.GSC_TZ || process.env.TZ || 'Europe/Ljubljana',
     logLevel: process.env.LOG_LEVEL || 'info',

@@ -61,7 +61,7 @@ test('/status is public and leaks no property, no error text and no secret', asy
   const s = (await res.json()) as Record<string, unknown>;
 
   assert.equal(s.commit, 'abcdef1');
-  assert.equal(s.writes_possible, false);
+  assert.equal(s.writes_possible, false, 'GSC_ALLOW_WRITE is unset in this run');
   assert.equal(s.multi_tenant, 'off');
   assert.equal(s.properties, 2, 'a count is fine; the names are not');
 
@@ -125,7 +125,8 @@ test('the connector completes a handshake and lists its tools', async () => {
   const list = await rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const names = (list.body as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name);
   assert.ok(names.includes('compare_periods'));
-  assert.equal(names.length, 6);
+  assert.ok(names.includes('submit_sitemap'), 'the write tools are registered even with writes off');
+  assert.equal(names.length, 11);
 });
 
 test('a tool call returns real content through the transport', async () => {

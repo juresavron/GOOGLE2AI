@@ -10,7 +10,14 @@
 import type { Config } from './env.ts';
 import { authKind } from './env.ts';
 
-export const SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';
+/**
+ * What this server asks Google for. The FULL webmasters scope, not webmasters.readonly.
+ *
+ * A scope is granted at consent time, so narrowing it here and widening it later would mean every
+ * tenant re-consents. What the token COULD do and what the server WILL do are separate questions:
+ * the second is answered by GSC_ALLOW_WRITE and the account's own switch, in tools.ts.
+ */
+export const SCOPES = ['https://www.googleapis.com/auth/webmasters', 'https://www.googleapis.com/auth/indexing'];
 
 export interface SiteEntry {
   siteUrl: string;
@@ -72,12 +79,22 @@ export interface GscStatus {
   sites: number | null;
 }
 
+export type IndexingType = 'URL_UPDATED' | 'URL_DELETED';
+
 export interface GSC {
   listSites(): Promise<SiteEntry[]>;
   searchAnalytics(q: AnalyticsQuery): Promise<AnalyticsRow[]>;
   inspectUrl(siteUrl: string, inspectionUrl: string): Promise<InspectionResult | null>;
   listSitemaps(siteUrl: string): Promise<SitemapEntry[]>;
   status(): GscStatus;
+
+  // ---- writes. Whether these are reachable at all is decided in tools.ts, never here: this layer
+  // talks to Google and has no opinion about permission.
+  submitSitemap(siteUrl: string, feedpath: string): Promise<void>;
+  deleteSitemap(siteUrl: string, feedpath: string): Promise<void>;
+  addSite(siteUrl: string): Promise<void>;
+  deleteSite(siteUrl: string): Promise<void>;
+  requestIndexing(url: string, type: IndexingType): Promise<{ notifyTime: string | null }>;
 }
 
 /**
@@ -102,7 +119,10 @@ export function cleanError(e: unknown): string {
   if (status === 401) {
     return `Google rejected the credentials (401). A refresh token can be revoked by changing the account password or withdrawing consent; reissue one. (${inner})`;
   }
-  if (status === 429) return `Google is rate-limiting these credentials (429). Search Console allows roughly 1200 queries per minute per project. (${inner})`;
+  if (status === 429) return `Google is rate-limiting these credentials (429). Search Console allows roughly 1200 queries per minute per project, and the Indexing API 200 requests per DAY. (${inner})`;
+  if (status === 404 && /urlNotification|indexing/i.test(inner)) {
+    return `The Indexing API refused this URL (404). It only accepts URLs on a property you are a verified OWNER of — not merely a user with access. (${inner})`;
+  }
   return inner;
 }
 
@@ -130,6 +150,7 @@ export class GoogleGSC implements GSC {
   private readonly kind: string;
   private readonly tenant: TenantCreds | null;
   private api: any = null;
+  private auth: any = null;
   private err: string | null = null;
   private checked: number | null = null;
   private siteCount: number | null = null;
@@ -168,13 +189,14 @@ export class GoogleGSC implements GSC {
         // message instead of four different downstream ones.
         throw new Error('GOOGLE_CREDENTIALS_JSON is not valid JSON. It must hold the whole service account key file, not a path to it.');
       }
-      auth = new google.auth.GoogleAuth({ credentials, scopes: [SCOPE] });
+      auth = new google.auth.GoogleAuth({ credentials, scopes: SCOPES });
     } else if (this.kind === 'file') {
-      auth = new google.auth.GoogleAuth({ keyFile: cfg.credentialsFile, scopes: [SCOPE] });
+      auth = new google.auth.GoogleAuth({ keyFile: cfg.credentialsFile, scopes: SCOPES });
     } else {
-      auth = new google.auth.GoogleAuth({ scopes: [SCOPE] });
+      auth = new google.auth.GoogleAuth({ scopes: SCOPES });
     }
 
+    this.auth = auth;
     this.api = google.searchconsole({ version: 'v1', auth });
     return this.api;
   }
@@ -269,6 +291,43 @@ export class GoogleGSC implements GSC {
     });
   }
 
+  // ------------------------------------------------------------------ writes
+
+  async submitSitemap(siteUrl: string, feedpath: string): Promise<void> {
+    await this.call(async (api) => api.sitemaps.submit({ siteUrl, feedpath }, this.opts()));
+  }
+
+  async deleteSitemap(siteUrl: string, feedpath: string): Promise<void> {
+    await this.call(async (api) => api.sitemaps.delete({ siteUrl, feedpath }, this.opts()));
+  }
+
+  async addSite(siteUrl: string): Promise<void> {
+    await this.call(async (api) => api.sites.add({ siteUrl }, this.opts()));
+  }
+
+  async deleteSite(siteUrl: string): Promise<void> {
+    await this.call(async (api) => api.sites.delete({ siteUrl }, this.opts()));
+  }
+
+  /**
+   * The Indexing API — a DIFFERENT service from Search Console, on its own host, with its own
+   * quota (200 requests/day by default) and its own enable step in the Cloud console.
+   *
+   * Built separately rather than through `this.call`, which is bound to the searchconsole client.
+   * Its errors still go through cleanError, so a 403 here reads like the ones next to it.
+   */
+  async requestIndexing(url: string, type: IndexingType): Promise<{ notifyTime: string | null }> {
+    try {
+      const { google } = await import('googleapis');
+      await this.client(); // builds and caches the auth object
+      const indexing = google.indexing({ version: 'v3', auth: this.auth });
+      const res = await indexing.urlNotifications.publish({ requestBody: { url, type } }, this.opts());
+      return { notifyTime: res.data?.urlNotificationMetadata?.latestUpdate?.notifyTime ?? null };
+    } catch (e) {
+      throw new Error(cleanError(e));
+    }
+  }
+
   status(): GscStatus {
     return {
       auth: this.kind,
@@ -358,6 +417,30 @@ export class MockGSC implements GSC {
     return [
       { path: 'https://example.com/sitemap.xml', lastSubmitted: '2026-09-01T09:00:00Z', lastDownloaded: '2026-09-18T02:14:00Z', isPending: false, isSitemapsIndex: false, type: 'sitemap', warnings: 2, errors: 0, submitted: 143, indexed: 139 },
     ];
+  }
+
+  /**
+   * Writes are RECORDED, not performed — which is what lets the suite assert that a guard stopped
+   * something without ever touching Google. A mock that silently accepted a write would prove
+   * nothing about whether the guard works.
+   */
+  readonly wrote: { op: string; args: string[] }[] = [];
+
+  async submitSitemap(siteUrl: string, feedpath: string): Promise<void> {
+    this.wrote.push({ op: 'submitSitemap', args: [siteUrl, feedpath] });
+  }
+  async deleteSitemap(siteUrl: string, feedpath: string): Promise<void> {
+    this.wrote.push({ op: 'deleteSitemap', args: [siteUrl, feedpath] });
+  }
+  async addSite(siteUrl: string): Promise<void> {
+    this.wrote.push({ op: 'addSite', args: [siteUrl] });
+  }
+  async deleteSite(siteUrl: string): Promise<void> {
+    this.wrote.push({ op: 'deleteSite', args: [siteUrl] });
+  }
+  async requestIndexing(url: string, type: IndexingType): Promise<{ notifyTime: string | null }> {
+    this.wrote.push({ op: 'requestIndexing', args: [url, type] });
+    return { notifyTime: '2026-09-20T00:00:00Z' };
   }
 
   status(): GscStatus {

@@ -30,6 +30,8 @@ export interface Account {
   property: string | null;
   quota_project: string | null;
   status: AccountStatus;
+  /** AND-ed with the server-wide cfg.allowWrite in tenants.ts. Both must be true. */
+  allow_write: boolean;
   last_checked_at: Date | null;
   last_error: string | null;
   created_at: Date;
@@ -50,7 +52,7 @@ export interface TokenRow {
   revoked_at: Date | null;
 }
 
-const ACCOUNT_COLS = 'a.id, a.user_id, a.label, a.google_email, a.property, a.quota_project, a.status, a.last_checked_at, a.last_error, a.created_at';
+const ACCOUNT_COLS = 'a.id, a.user_id, a.label, a.google_email, a.property, a.quota_project, a.status, a.allow_write, a.last_checked_at, a.last_error, a.created_at';
 
 export class Db {
   // Written out rather than a `private readonly q` constructor parameter: parameter properties are
@@ -172,6 +174,18 @@ export class Db {
     const { rowCount } = await this.q.query(
       `update public.gsc_accounts set label = $3, updated_at = now() where id = $1 and user_id = $2 and deleted_at is null`,
       [accountId, userId, label],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  /**
+   * The account's own half of the write switch. User-scoped, and a server route rather than a
+   * client grant — see the note at the foot of db/schema.sql for why the column is never granted.
+   */
+  async setAllowWrite(userId: string, accountId: string, allow: boolean): Promise<boolean> {
+    const { rowCount } = await this.q.query(
+      `update public.gsc_accounts set allow_write = $3, updated_at = now() where id = $1 and user_id = $2 and deleted_at is null`,
+      [accountId, userId, allow],
     );
     return (rowCount ?? 0) > 0;
   }

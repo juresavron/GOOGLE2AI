@@ -8,9 +8,11 @@ the URL, no OAuth between Claude and the server), same "clean text in, clean tex
 It talks to the Search Console API as you, and exposes MCP tools over Streamable HTTP. Nothing is
 sent anywhere except to Google and to the Claude client that holds the secret URL.
 
-**Read-only, structurally.** There is no tool here that submits a URL, changes a setting or writes
-anything, and the OAuth scope it asks for (`webmasters.readonly`) cannot do those things even if one
-were added by mistake.
+**Reading by default, writing by decision.** The six read tools work as soon as it is connected.
+The five write tools are registered but **refuse unless `GSC_ALLOW_WRITE=true`**, and on the
+multi-account build the account's own switch must be on as well — both, or nothing happens. Same
+arrangement as whatsapp2ai's `WA_ALLOW_SEND`, for the same reason: the read half is safe to hand an
+agent, and the write half removes a property from Search Console.
 
 ## Tools
 
@@ -22,6 +24,16 @@ were added by mistake.
 | `compare_periods(siteUrl, days, endDate, dimensions, rowLimit, …filters)` | the same metrics over two consecutive windows, with the change on every row |
 | `inspect_url(inspectionUrl, siteUrl)` | indexing status, last crawl, the canonical Google chose, mobile usability |
 | `list_sitemaps(siteUrl)` | submitted sitemaps: when each was last read, URLs found, URLs indexed |
+
+Write tools, all refused unless switched on:
+
+| tool | what it does |
+|---|---|
+| `submit_sitemap(feedpath, siteUrl)` | submit or resubmit a sitemap |
+| `delete_sitemap(feedpath, siteUrl)` | un-submit one; Google stops tracking it |
+| `add_property(siteUrl)` | add a property — it still needs ownership verification separately |
+| `remove_property(siteUrl)` | remove one. **Not reversible from here**: re-adding needs verification again. Takes no default target, deliberately |
+| `request_indexing(url, type)` | Indexing API. Google supports it only for `JobPosting` and `BroadcastEvent` pages, 200/day — passed through honestly rather than pretended otherwise |
 
 Properties are addressed exactly as Search Console spells them — `sc-domain:example.com` for a
 domain property, `https://example.com/` (with the trailing slash) for a URL-prefix one. Set

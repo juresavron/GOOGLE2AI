@@ -63,10 +63,15 @@ test('the instructions name the bound property when one is configured, and say t
   assert.match(instructions(makeCtx()), /call it first/);
 });
 
-test('every tool is registered and reads', async () => {
+test('every tool is registered, including the writes, which exist even when switched off', async () => {
   const c = await connect(makeCtx());
   const names = (await c.client.listTools()).tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['compare_periods', 'inspect_url', 'list_sitemaps', 'list_sites', 'search_analytics', 'status']);
+  // The write tools are REGISTERED rather than hidden when writes are off, so a refusal can say
+  // how to turn them on — hiding them makes "why can't you do that" unanswerable.
+  assert.deepEqual(names, [
+    'add_property', 'compare_periods', 'delete_sitemap', 'inspect_url', 'list_sitemaps', 'list_sites',
+    'remove_property', 'request_indexing', 'search_analytics', 'status', 'submit_sitemap',
+  ]);
   await c.close();
 });
 
@@ -139,8 +144,23 @@ test('inspect_url calls out a canonical Google chose over the declared one', asy
 });
 
 test('an empty result explains itself rather than just saying zero', async () => {
-  const empty: GSC = { ...new MockGSC(), searchAnalytics: async () => [], listSites: async () => [], listSitemaps: async () => [], inspectUrl: async () => null, status: () => new MockGSC().status() };
-  const c = await connect(makeCtx({ defaultSite: 'sc-domain:example.com' }, empty));
+  // Subclassed, not spread: class methods live on the prototype, so { ...new MockGSC() } copies
+  // none of them and every method added to GSC later would have to be re-listed here.
+  class EmptyGSC extends MockGSC {
+    override async searchAnalytics() {
+      return [];
+    }
+    override async listSites() {
+      return [];
+    }
+    override async listSitemaps() {
+      return [];
+    }
+    override async inspectUrl() {
+      return null;
+    }
+  }
+  const c = await connect(makeCtx({ defaultSite: 'sc-domain:example.com' }, new EmptyGSC()));
   const { text } = await c.call('search_analytics');
   assert.match(text, new RegExp(`last ${LAG_DAYS} days`), 'the likeliest cause is named');
   await c.close();
@@ -262,10 +282,86 @@ test('with no mirror configured, nothing mentions one', async () => {
   await c.close();
 });
 
-test('status reports the lag and that nothing here can write', async () => {
+const WRITES: [string, Record<string, unknown>][] = [
+  ['submit_sitemap', { feedpath: 'https://example.com/sitemap.xml' }],
+  ['delete_sitemap', { feedpath: 'https://example.com/sitemap.xml' }],
+  ['add_property', { siteUrl: 'sc-domain:example.com' }],
+  ['remove_property', { siteUrl: 'sc-domain:example.com' }],
+  ['request_indexing', { url: 'https://example.com/a' }],
+];
+
+test('with writes off, every write tool refuses AND reaches Google with nothing', async () => {
+  for (const [name, args] of WRITES) {
+    const gsc = new MockGSC();
+    const c = await connect(makeCtx({ defaultSite: 'sc-domain:example.com', allowWrite: false }, gsc));
+    const { isError, text } = await c.call(name, args);
+
+    assert.equal(isError, true, name);
+    // Both routes named, because whoever reads this is the one who has to act on it.
+    assert.match(text, /dashboard/, name);
+    assert.match(text, /GSC_ALLOW_WRITE=true/, name);
+    // The guard is upstream of the call, not a check on the way back.
+    assert.deepEqual(gsc.wrote, [], `${name} must not reach Google`);
+    await c.close();
+  }
+});
+
+test('with writes on, each write tool does exactly one thing', async () => {
+  for (const [name, args] of WRITES) {
+    const gsc = new MockGSC();
+    const c = await connect(makeCtx({ defaultSite: 'sc-domain:example.com', allowWrite: true }, gsc));
+    const { isError } = await c.call(name, args);
+    assert.equal(isError, false, name);
+    assert.equal(gsc.wrote.length, 1, name);
+    await c.close();
+  }
+});
+
+test('the destructive tools say what cannot be undone', async () => {
+  const c = await connect(makeCtx({ defaultSite: 'sc-domain:example.com', allowWrite: true }, new MockGSC()));
+  const tools = (await c.client.listTools()).tools;
+  const desc = (n: string) => String(tools.find((t) => t.name === n)?.description ?? '');
+
+  // Claude reads these before calling. A destructive tool whose description does not say so is
+  // how an agent removes a property because a sentence was ambiguous.
+  assert.match(desc('remove_property'), /DESTRUCTIVE/);
+  assert.match(desc('remove_property'), /verification again/);
+  assert.match(desc('delete_sitemap'), /DESTRUCTIVE/);
+  assert.match(desc('request_indexing'), /JobPosting/, 'the restriction belongs in the description, not a footnote');
+  await c.close();
+});
+
+test('remove_property has NO default target', async () => {
+  const gsc = new MockGSC();
+  const c = await connect(makeCtx({ defaultSite: 'sc-domain:example.com', allowWrite: true }, gsc));
+  const { isError } = await c.call('remove_property', {});
+  // Every other tool falls back to the configured property. A tool that DELETES one must never act
+  // on a target nobody typed.
+  assert.equal(isError, true);
+  assert.deepEqual(gsc.wrote, []);
+  await c.close();
+});
+
+test('the instructions state the write posture either way', async () => {
+  assert.match(instructions(makeCtx({ allowWrite: true })), /WRITES ARE ENABLED/);
+  assert.match(instructions(makeCtx({ allowWrite: true })), /Confirm the exact target/);
+  assert.match(instructions(makeCtx({ allowWrite: false })), /switched off for this connector/);
+  // The old blanket claim was true and is not any more; it must not survive anywhere.
+  assert.doesNotMatch(instructions(makeCtx({ allowWrite: false })), /cannot submit URLs/);
+});
+
+test('status reports whether writing is actually possible', async () => {
+  for (const allowWrite of [true, false]) {
+    const c = await connect(makeCtx({ defaultSite: 'sc-domain:example.com', allowWrite }));
+    assert.equal(JSON.parse((await c.call('status')).text).writes_possible, allowWrite);
+    await c.close();
+  }
+});
+
+test('status reports the lag, and writes off by default', async () => {
   const c = await connect(makeCtx({ defaultSite: 'sc-domain:example.com' }));
   const st = JSON.parse((await c.call('status')).text);
-  assert.equal(st.writes_possible, false);
+  assert.equal(st.writes_possible, false, 'off unless GSC_ALLOW_WRITE says otherwise');
   assert.equal(st.reporting_lag_days, LAG_DAYS);
   assert.equal(st.latest_complete_date, iso(new Date(Date.now() - LAG_DAYS * DAY)));
   await c.close();

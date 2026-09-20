@@ -32,10 +32,15 @@ export function mountPages(app: Express, cfg: Config): void {
         `<h1>Privacy</h1>` +
           operatorBlock(cfg) +
           `<h2>What this service touches</h2>
-           <p>When you connect a Google account, Google gives this service a token that lets it
-           <strong>read</strong> the Search Console properties that account can already see. The scope
-           requested is <code>webmasters.readonly</code> — it cannot submit URLs, change settings or
-           write anything to your property, and no tool here attempts to.</p>
+           <p>When you connect a Google account, Google gives this service a token for the Search
+           Console properties that account can already see. The scopes requested are
+           <code>webmasters</code> and <code>indexing</code>.</p>
+           <p><strong>That includes writing.</strong> Reading — search analytics, index status,
+           sitemap status — is what it does by default. It can also submit and remove sitemaps, add
+           and remove properties from the account, and send Indexing API notifications. Those tools
+           are <strong>switched off unless you turn them on</strong> for your connection, and they
+           stay off until you do. What it cannot do at any setting: read or send your mail, touch any
+           other Google product, or change the content of your site.</p>
            <p>It also reads your email address from Google, for one reason: to show you which Google
            account you connected. Connecting the wrong one is the most common mistake, and without an
            address on screen it looks identical to having no properties at all.</p>
@@ -79,13 +84,19 @@ export function mountPages(app: Express, cfg: Config): void {
           operatorBlock(cfg) +
           `<h2>What it does</h2>
            <p>This service reads Google Search Console on your behalf and exposes it to an AI client
-           over the Model Context Protocol. It is read-only.</p>
+           over the Model Context Protocol. It can also make a small number of changes — submitting and
+           removing sitemaps, adding and removing properties, and Indexing API notifications — but
+           only for connections where you have explicitly switched writing on.</p>
 
            <h2>Your side</h2>
            <ul>
              <li>Connect only Google accounts you are entitled to use.</li>
              <li>Your connector URL is a credential. Anyone holding it can read the property it is
-                 bound to. Treat it like a password; revoke it in the dashboard if it leaks.</li>
+                 bound to — and, if you have enabled writing for that connection, make the changes
+                 listed above. Treat it like a password; revoke it in the dashboard if it leaks.</li>
+             <li>Enabling writing points an AI client at operations that calling again does not undo.
+                 Removing a property in particular needs ownership verification to restore. Leave it
+                 off unless you want it.</li>
              <li>Do not use it to work around Google's API quotas or terms.</li>
            </ul>
 

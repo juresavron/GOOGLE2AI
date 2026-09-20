@@ -190,7 +190,11 @@ export class Tenants {
       // The account's property becomes this connector's default, so its tools can be called with no
       // siteUrl and the instructions can name it — exactly how the siblings read as bound to one
       // account rather than to a service.
-      cfg: { ...this.cfg, defaultSite: account.property },
+      // TWO SWITCHES, BOTH REQUIRED. The server's GSC_ALLOW_WRITE and the account's own. One
+      // switch would mean enabling writes for yourself enabled them for every tenant, and the
+      // blast radius is somebody's property being removed from Search Console by an agent that
+      // misread a sentence.
+      cfg: { ...this.cfg, defaultSite: account.property, allowWrite: this.cfg.allowWrite && account.allow_write },
       gsc,
       // The mirror is keyed by account, so it only exists on this surface. The single-account
       // server has no database and no account id, and asks Google every time.

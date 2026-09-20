@@ -24,7 +24,23 @@ import crypto from 'node:crypto';
  * to show: list_sites simply comes back empty, which reads as "I have no properties". Both are
  * non-sensitive scopes and neither widens what the token can do to Search Console.
  */
-export const SCOPES = ['https://www.googleapis.com/auth/webmasters.readonly', 'openid', 'email'];
+export const SCOPES = [
+  // The FULL Search Console scope, not webmasters.readonly. It is a superset, and a scope is
+  // granted at consent time — widening it later means every tenant consents again, so the write
+  // tools would otherwise be unreachable for everyone who connected before they existed.
+  // Whether a write actually happens is decided by GSC_ALLOW_WRITE and the account's own switch,
+  // not by what the token could theoretically do.
+  'https://www.googleapis.com/auth/webmasters',
+  // A SEPARATE API with its own quota and its own enable step in the Cloud console. Google
+  // restricts it to JobPosting and BroadcastEvent structured data; request_indexing says so and
+  // passes Google's refusal straight through rather than pretending otherwise.
+  'https://www.googleapis.com/auth/indexing',
+  // Not needed to read or write anything. They exist so the dashboard can show WHICH Google
+  // account consented — the most common failure is consenting as the wrong one, and without an
+  // address on screen it is indistinguishable from owning no properties.
+  'openid',
+  'email',
+];
 
 const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';

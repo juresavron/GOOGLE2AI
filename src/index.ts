@@ -97,7 +97,7 @@ app.get('/status', (_req, res) => {
     auth: st.auth,
     ready: st.ready,
     healthy: !st.error,
-    writes_possible: false,
+    writes_possible: cfg.allowWrite,
     reporting_lag_days: LAG_DAYS,
     // Tells "the database is misconfigured" from "the dashboard is broken", without saying which —
     // the reason is in the logs, where it belongs.

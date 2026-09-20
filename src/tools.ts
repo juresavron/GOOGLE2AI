@@ -112,11 +112,16 @@ const delta = (now: number, then: number) => {
 export function instructions(ctx: Ctx): string {
   const { cfg } = ctx;
   const bound = cfg.defaultSite ? ` Bound to ${cfg.defaultSite}, which every tool assumes when siteUrl is omitted.` : '';
-  return `Google Search Console, read-only.${bound}
+  return `Google Search Console.${bound}
 Properties are addressed exactly as Search Console spells them: "sc-domain:example.com" for a domain property, "https://example.com/" (with the trailing slash) for a URL-prefix one. list_sites is the authority on which exist${cfg.defaultSite ? '' : ' — call it first, since no property is configured as the default'}.
 Start with search_analytics for what people searched and where the site ranked, compare_periods for whether that is getting better or worse, inspect_url for why one page is or is not in the index, list_sitemaps for whether Google is reading the sitemap at all.
 SEARCH CONSOLE IS ${LAG_DAYS} DAYS BEHIND. There is no data for today or yesterday, and the last two days of any range are incomplete and will rise later. Ranges left unset end ${LAG_DAYS} days ago for that reason; a range that ends today is not an error but its tail is not real. Data older than 16 months does not exist at Google at all${ctx.mirror ? ', but this connector keeps its own copy of what it has already seen — status() says how far back that reaches, and a range inside it is answered from there without spending API quota' : ''}.
-Times are ${cfg.tz}. This connector cannot submit URLs, change settings or write anything — every tool reads.`;
+Times are ${cfg.tz}.
+${
+    cfg.allowWrite
+      ? 'WRITES ARE ENABLED on this connector: submit_sitemap, delete_sitemap, add_property, remove_property and request_indexing all change something at Google, and remove_property drops a property out of Search Console along with its history. Confirm the exact target with the person before calling any of them, every time — none is undone by calling it again.'
+      : 'Everything here reads. The write tools (submit_sitemap, delete_sitemap, add_property, remove_property, request_indexing) exist but are switched off for this connector and will refuse.'
+  }`;
 }
 
 // ------------------------------------------------------------------ the server
@@ -185,7 +190,7 @@ export function buildServer(ctx: Ctx): McpServer {
       timezone: cfg.tz,
       reporting_lag_days: LAG_DAYS,
       latest_complete_date: defaultEnd(),
-      writes_possible: false,
+      writes_possible: cfg.allowWrite,
       mirror: mirror?.length ? mirror : null,
       version: VERSION,
     });
@@ -359,6 +364,93 @@ export function buildServer(ctx: Ctx): McpServer {
         for (const i of r.mobile.issues) lines.push(`  - ${i.issueType ?? 'issue'}: ${i.message ?? ''}`);
       }
       return text(lines.join('\n'));
+    },
+  );
+
+  /**
+   * Two switches upstream of every write, and the error names both routes because whoever reads it
+   * is the one who has to act on it. Ported straight from whatsapp2ai's guardSend, which exists for
+   * the same reason: the read half of one of these connectors is safe to hand an agent, and the
+   * write half is not.
+   *
+   * On the multi-tenant build cfg.allowWrite is the ACCOUNT's switch (tenants.ts narrows it), so a
+   * deployment with writes enabled still has them off per account until somebody says otherwise.
+   */
+  const guardWrite = (what: string) => {
+    if (!cfg.allowWrite) {
+      throw new Error(`Writing is switched off for this connector, so ${what} did nothing. Turn it on in the dashboard, or set GSC_ALLOW_WRITE=true on a self-hosted server.`);
+    }
+  };
+
+  tool(
+    'submit_sitemap',
+    'Submit a sitemap to Search Console, or resubmit one to ask Google to re-read it. CHANGES YOUR PROPERTY — confirm the URL with the person first.',
+    {
+      feedpath: z.string().describe('Full URL of the sitemap, e.g. https://example.com/sitemap.xml'),
+      siteUrl: z.string().optional().describe('Property, exactly as list_sites spells it. Omit to use the configured default.'),
+    },
+    async (a) => {
+      guardWrite('submit_sitemap');
+      const s = site(a.siteUrl);
+      await gsc.submitSitemap(s, a.feedpath);
+      return text(`Submitted ${a.feedpath} to ${s}. Google reads sitemaps on its own schedule — list_sitemaps will show a lastDownloaded once it has, which is usually hours rather than minutes.`);
+    },
+  );
+
+  tool(
+    'delete_sitemap',
+    'Un-submit a sitemap from Search Console. DESTRUCTIVE: Google stops tracking it, and the submitted/indexed counts for it are lost. Confirm with the person first.',
+    {
+      feedpath: z.string().describe('Full URL of the sitemap, exactly as list_sitemaps shows it'),
+      siteUrl: z.string().optional().describe('Property, exactly as list_sites spells it. Omit to use the configured default.'),
+    },
+    async (a) => {
+      guardWrite('delete_sitemap');
+      const s = site(a.siteUrl);
+      await gsc.deleteSitemap(s, a.feedpath);
+      return text(`Removed ${a.feedpath} from ${s}. This does not deindex anything — it only stops Google tracking that sitemap. Resubmit with submit_sitemap if it was a mistake.`);
+    },
+  );
+
+  tool(
+    'add_property',
+    'Add a property to this Search Console account. It still has to be VERIFIED separately — adding it does not grant access to any data.',
+    { siteUrl: z.string().describe('sc-domain:example.com for a domain property, or https://example.com/ with the trailing slash') },
+    async (a) => {
+      guardWrite('add_property');
+      await gsc.addSite(a.siteUrl);
+      return text(`Added ${a.siteUrl}. It will return no data until it is verified — Search Console → Settings → Ownership verification. A domain property needs a DNS TXT record, which cannot be done from here.`);
+    },
+  );
+
+  tool(
+    'remove_property',
+    'Remove a property from this Search Console account. DESTRUCTIVE AND NOT REVERSIBLE FROM HERE: re-adding it needs ownership verification again, and Search Console history is not restored by it. Always confirm the exact property with the person first.',
+    { siteUrl: z.string().describe('Property, exactly as list_sites spells it') },
+    async (a) => {
+      guardWrite('remove_property');
+      // Deliberately no default: every other tool falls back to the configured property, and a
+      // tool that DELETES one must never act on a target nobody typed.
+      await gsc.deleteSite(a.siteUrl);
+      return text(`Removed ${a.siteUrl} from this Search Console account. Re-adding it requires ownership verification again.`);
+    },
+  );
+
+  tool(
+    'request_indexing',
+    'Ask Google to recrawl or drop one URL, via the Indexing API. HEAVILY RESTRICTED: Google officially supports it only for pages carrying JobPosting or BroadcastEvent structured data, and ignores it for ordinary pages. The quota is 200 requests per day.',
+    {
+      url: z.string().describe('The full URL, on a property you are a verified OWNER of'),
+      type: z.enum(['URL_UPDATED', 'URL_DELETED']).optional().describe('URL_UPDATED to ask for a recrawl (default), URL_DELETED to report it gone'),
+    },
+    async (a) => {
+      guardWrite('request_indexing');
+      const type = a.type ?? 'URL_UPDATED';
+      const r = await gsc.requestIndexing(a.url, type);
+      return text(
+        `Google accepted a ${type} notification for ${a.url}${r.notifyTime ? ` at ${r.notifyTime}` : ''}.\n\n` +
+          `Accepting it is not the same as acting on it: outside JobPosting and BroadcastEvent pages Google documents no effect, and inspect_url is the only way to find out whether anything actually changed.`,
+      );
     },
   );
 

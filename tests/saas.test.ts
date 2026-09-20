@@ -76,7 +76,7 @@ test('the landing page renders without touching the database', async () => {
   const html = await res.text();
   assert.match(html, /GOOGLE2AI/);
   // It is the page a stranger sees; it must not depend on Postgres being up.
-  assert.match(html, /Read-only/);
+  assert.match(html, /Reading by default/);
 });
 
 test('the sign-in page renders, and the dashboard refuses without a session', async () => {
@@ -142,9 +142,15 @@ test('the legal pages render, and refuse to invent an operator', async () => {
   }
 });
 
-test('the privacy page states the read-only scope and what is not stored', async () => {
+test('the privacy page states the real scopes, that writing exists, and what is not stored', async () => {
   const html = await (await fetch(`${base}/privacy`)).text();
-  assert.match(html, /webmasters\.readonly/);
+  assert.match(html, /<code>webmasters<\/code>/);
+  assert.match(html, /<code>indexing<\/code>/);
+  // The page used to promise read-only, which was true then and is not now. A privacy page that
+  // understates what the software can do is worse than one that says nothing.
+  assert.match(html, /That includes writing/);
+  assert.match(html, /switched off unless you turn them on/);
+  assert.doesNotMatch(html, /read-only/i);
   // The two claims the rest of the codebase actually has to keep: no copy of the traffic, and only
   // a hash of the connector URL.
   assert.match(html, /never a search term/);

@@ -9,6 +9,14 @@
 //
 //   node scripts/get-refresh-token.mjs --client-id=... --client-secret=...
 //
+// It listens on a FIXED loopback port (8765 by default, --port=N to change), because a Web
+// application client only accepts redirect URIs registered on it exactly, port included. A Desktop
+// client would accept any loopback port and need none registered -- if you have one of those, this
+// still works, the registration is simply unnecessary. Register this on the Web client:
+//
+//   http://127.0.0.1:8765/callback
+//   http://localhost:8765/callback      (register both; which one Google accepts has varied)
+//
 // The token it prints does not expire on a schedule. It stops working if the Google account's
 // password changes, if consent is withdrawn, or -- the one that catches people -- if the OAuth
 // client is still in "Testing" on the consent screen, where refresh tokens expire after 7 days.
@@ -23,15 +31,26 @@ const arg = (name) => {
 
 const clientId = arg('client-id');
 const clientSecret = arg('client-secret');
+const port = Number(arg('port') || 8765);
 if (!clientId || !clientSecret) {
   console.error('Usage: node scripts/get-refresh-token.mjs --client-id=... --client-secret=...\n');
   console.error('Create the client in Google Cloud Console -> APIs & Services -> Credentials ->');
-  console.error('Create credentials -> OAuth client ID -> Desktop app. A Desktop client accepts any');
-  console.error('http://127.0.0.1 port, which is what this script needs.');
+  console.error('Create credentials -> OAuth client ID.');
+  console.error('');
+  console.error('  Desktop app       accepts any loopback port; nothing to register.');
+  console.error('  Web application   register http://127.0.0.1:8765/callback as an authorised');
+  console.error('                    redirect URI (and http://localhost:8765/callback alongside it).');
   process.exit(2);
 }
 
-const SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';
+// Must match src/google-oauth.ts SCOPES. A token minted with less than the server asks for fails
+// later at the first write, with an error about the scope rather than about the tool.
+const SCOPE = [
+  'https://www.googleapis.com/auth/webmasters',
+  'https://www.googleapis.com/auth/indexing',
+  'openid',
+  'email',
+].join(' ');
 const state = crypto.randomBytes(16).toString('hex');
 
 const server = http.createServer(async (req, res) => {
@@ -86,6 +105,9 @@ const server = http.createServer(async (req, res) => {
   console.log(`  GOOGLE_CLIENT_SECRET="${clientSecret}" \\`);
   console.log(`  GOOGLE_REFRESH_TOKEN="${j.refresh_token}" \\`);
   console.log(`  GOOGLE_QUOTA_PROJECT="your-project-id" -a google2ai`);
+  console.log('\nThe write tools stay OFF until you also set GSC_ALLOW_WRITE=true. This token can');
+  console.log('submit and delete sitemaps and add and remove properties, so that switch is the');
+  console.log('difference between a connector that reads and one that can remove a property.');
   console.log('─────────────────────────────────────────────────────────────');
   console.log('\nGOOGLE_QUOTA_PROJECT is not optional with user credentials: Search Console answers');
   console.log('403 without it. Use the project where you enabled the Search Console API.');
@@ -94,8 +116,18 @@ const server = http.createServer(async (req, res) => {
 });
 
 let redirectUri = '';
-server.listen(0, '127.0.0.1', () => {
-  redirectUri = `http://127.0.0.1:${server.address().port}/callback`;
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    // Named rather than left as a stack trace: a fixed port is the price of a Web client, and
+    // something else holding it is the one failure that has nothing to do with Google.
+    console.error(`\nPort ${port} is already in use. Close whatever is using it, or pass --port=N`);
+    console.error('and register http://127.0.0.1:N/callback on the OAuth client to match.');
+    process.exit(1);
+  }
+  throw e;
+});
+server.listen(port, '127.0.0.1', () => {
+  redirectUri = `http://127.0.0.1:${port}/callback`;
   const consent = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   consent.search = new URLSearchParams({
     client_id: clientId,
@@ -112,6 +144,8 @@ server.listen(0, '127.0.0.1', () => {
 
   console.log('\nOpen this in a browser, signed in as the Google account that owns the property:\n');
   console.log(consent.toString());
-  console.log(`\nAdd ${redirectUri} to the client's authorised redirect URIs if Google asks.`);
+  console.log(`\nThis must be registered on the client EXACTLY, port and path included: ${redirectUri}`);
+  console.log("(A Desktop client needs no registration. A Web application client does, and Google's");
+  console.log('changes can take a few minutes to take effect.)');
   console.log('\nWaiting for the callback…');
 });

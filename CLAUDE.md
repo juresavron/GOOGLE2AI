@@ -68,12 +68,42 @@ collapsed. So: unset ranges end `LAG_DAYS` ago, `status()` reports `latest_compl
 instructions string says it in capitals. This is the single highest-value thing in the repository
 and it is three lines of code.
 
+## Writing
+
+This connector is **not read-only**, and it used to be — several claims in the codebase asserted it,
+and all of them were corrected rather than left to rot (the privacy page especially, which is a
+promise to whoever connects an account, not documentation).
+
+Five write tools: `submit_sitemap`, `delete_sitemap`, `add_property`, `remove_property`,
+`request_indexing`. That is the **entire** write surface Google exposes for Search Console — there
+is no API to request indexing of an ordinary page, remove a URL, or change a setting, at any scope.
+
+**Two switches, both required.** `GSC_ALLOW_WRITE` on the server, AND the account's own
+`allow_write` (`db/003_allow_write.sql`), AND-ed in `tenants.ts`. Both default false. One switch
+would mean enabling writes for yourself enabled them for every tenant, and the blast radius is
+somebody's property being removed from Search Console by an agent that misread a sentence. Exactly
+whatsapp2ai's `WA_ALLOW_SEND` arrangement.
+
+The tools are **registered even when writing is off**, and refuse with a message naming both routes
+to turn it on. Hiding them makes "why can't you do that" unanswerable.
+
+Two details worth keeping:
+
+- **`remove_property` takes no default target.** Every other tool falls back to `GSC_DEFAULT_SITE`.
+  A tool that deletes one must never act on a target nobody typed.
+- **`request_indexing` tells the truth in its description.** Google restricts the Indexing API to
+  `JobPosting` and `BroadcastEvent` structured data and ignores it elsewhere, whatever the blog
+  posts say. The tool passes Google's answer through and says that accepting a notification is not
+  the same as acting on it.
+
 ## The instructions string
 
 `instructions(ctx)` in `tools.ts` is what Claude reads before calling anything, and it is most of
 why these connectors feel like a colleague rather than an API. It names the bound property, gives
 both property spellings (which are not guessable), says which tool to start with for which question,
-and states the lag. Its siblings each carry one; a tool list without it is a bag of endpoints.
+and states the lag — and now states the write posture either way, because "this connector can
+remove a property" is not something to leave implicit. Its siblings each carry one; a tool list
+without it is a bag of endpoints.
 
 ## Testing
 

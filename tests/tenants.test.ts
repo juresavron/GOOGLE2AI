@@ -19,6 +19,7 @@ const account = (over: Partial<Account> = {}): Account => ({
   property: 'sc-domain:ocenagor.si',
   quota_project: 'proj-from-row',
   status: 'connected',
+  allow_write: false,
   last_checked_at: null,
   last_error: null,
   created_at: new Date(),

@@ -15,9 +15,13 @@ It is a worse thing to leak than an IMAP password, on two counts:
 - **Silent.** Reading a mailbox at least leaves a session in the owner's security log. Using a
   refresh token to read Search Console leaves the owner nothing to notice.
 
-It is also *narrower* than either sibling's credential: the scope is `webmasters.readonly`, so it
-cannot send mail as them, cannot message their contacts, and cannot write anything to their
-property. A leak exposes their search analytics, not their business.
+It is *narrower* than either sibling's credential in reach — `webmasters` and `indexing` cannot send
+mail as them, cannot message their contacts, and cannot touch any other Google product — but it is
+**not read-only**. A leaked token on a connection with writing enabled can remove a property from
+their Search Console account, and only ownership verification restores it.
+
+That is why writing takes **two** switches, `GSC_ALLOW_WRITE` and the account's own `allow_write`,
+both off by default. Turning it on server-wide turns it on for nobody.
 
 ## The three things that must be true
 
@@ -37,7 +41,7 @@ days**. Every tenant's connector dies weekly with `invalid_grant`, and nothing i
 unless you read the message this server writes for exactly that case.
 
 Publishing needs no verification review while the app is internal or has few users. If you take it
-further, `webmasters.readonly` is a **sensitive** scope: Google will want the privacy policy, the
+further, `webmasters` and `indexing` are both **sensitive** scopes: Google will want the privacy policy, the
 terms, a domain you control, and a demonstration video. Budget weeks, not days.
 
 ## Quota is shared, and it is yours

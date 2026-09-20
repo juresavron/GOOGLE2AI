@@ -104,7 +104,7 @@ export function mountSaas(app: Express, d: SaasDeps): void {
         'GOOGLE2AI',
         `<h1>GOOGLE2AI</h1>
          <p>Your Google Search Console, in Claude. Ask what people searched for, which pages are gaining or losing, and why a page is not indexed — in the conversation, not in a dashboard.</p>
-         <p style="${S.muted}">Read-only. This connector cannot submit URLs, change settings or write anything to your property.</p>
+         <p style="${S.muted}">Reading by default. Sitemap and property changes are possible, but switched off until you turn them on for a connection.</p>
          <p><a style="${S.btn};text-decoration:none;display:inline-block" href="/login">Sign in</a></p>
          <p style="${S.muted}"><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></p>`,
       ),
@@ -207,9 +207,14 @@ export function mountSaas(app: Express, d: SaasDeps): void {
                     : `<p style="${S.muted}">No properties are visible to ${esc(a.google_email ?? 'this account')}. That usually means the consent was given as a different Google account than the one that owns the property.</p>`
                   : '') +
                 (a.property
-                  ? `<p style="${S.muted}">${tokens.length} connector URL${tokens.length === 1 ? '' : 's'}</p>
+                  ? `<p style="${S.muted}">${tokens.length} connector URL${tokens.length === 1 ? '' : 's'} · writing is ${a.allow_write ? '<strong>on</strong>' : 'off'}${a.allow_write && !cfg.allowWrite ? ' for this account, but off server-wide' : ''}</p>
                      <form method="post" action="/app/accounts/${encodeURIComponent(a.id)}/tokens" style="display:inline">
                        <button style="${S.ghost}" type="submit">New connector URL</button>
+                     </form>
+                     <form method="post" action="/app/accounts/${encodeURIComponent(a.id)}/write" style="display:inline"
+                           data-confirm="${a.allow_write ? `Stop ${esc(a.label)} writing?` : `Let ${esc(a.label)} submit and delete sitemaps, add and remove properties? Removing a property is not undone by re-adding it.`}">
+                       <input type="hidden" name="allow" value="${a.allow_write ? '0' : '1'}">
+                       <button style="${S.ghost}" type="submit">${a.allow_write ? 'Stop writing' : 'Allow writing'}</button>
                      </form>`
                   : '') +
                 ` <form method="post" action="/app/accounts/${encodeURIComponent(a.id)}/delete" style="display:inline" data-confirm="Delete ${esc(a.label)}? This revokes the Google grant and every connector URL.">
@@ -284,6 +289,28 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     const ok = await db.setProperty(user.id, String(req.params.id), property).catch(() => false);
     tenants.forget(String(req.params.id));
     redirect(res, ok ? '/app?m=' + encodeURIComponent('Property set.') : '/app?e=' + encodeURIComponent('That is not a property Search Console would accept.'));
+  });
+
+  app.post('/app/accounts/:id/write', async (req, res) => {
+    const user = await guard(req, res);
+    if (!user) return;
+    const allow = String(req.body?.allow ?? '') === '1';
+    const ok = await db.setAllowWrite(user.id, String(req.params.id), allow);
+    // The cached client carries the old cfg, so a toggle that did not drop it would leave writes
+    // enabled — or refused — for up to the cache TTL after the button said otherwise.
+    tenants.forget(String(req.params.id));
+    if (!ok) return redirect(res, '/app?e=' + encodeURIComponent('No such account.'));
+    redirect(
+      res,
+      '/app?m=' +
+        encodeURIComponent(
+          allow
+            ? cfg.allowWrite
+              ? 'Writing enabled for this account.'
+              : 'Enabled for this account — but writing is off server-wide (GSC_ALLOW_WRITE), so the tools will still refuse.'
+            : 'Writing disabled for this account.',
+        ),
+    );
   });
 
   app.post('/app/accounts/:id/tokens', async (req, res) => {
