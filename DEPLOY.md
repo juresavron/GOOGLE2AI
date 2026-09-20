@@ -114,9 +114,10 @@ connector URLs, read **[SAAS.md](SAAS.md)** first — it covers what you are tak
 
 1. **A Supabase project of its own.** Not imap2ai's or whatsapp2ai's: `db/schema.sql` refuses to run
    on either, because `mcp_tokens` and `mcp_calls` exist in all three and the collision is silent.
-2. Apply, in the SQL editor and in this order: `db/schema.sql`, `db/002_mirror.sql`,
-   `db/003_allow_write.sql`, `db/004_tenant_quota_project.sql`, `db/005_all_properties.sql`,
-   `db/006_settings.sql`. Each is safe to re-run.
+2. Apply, in the SQL editor: **`db/schema.sql` first**, then every `db/0NN_*.sql` in ascending
+   order. Each is safe to re-run, so re-applying the lot is the way to catch up a database of
+   unknown vintage. Read the directory rather than this sentence — a list here is a second place to
+   remember a new migration, and CI stopped keeping one for exactly that reason.
 3. Set the rest:
 
 ```bash
