@@ -112,14 +112,39 @@ bypasses RLS, so those joins are the real enforcement for everything in this fil
 
 1. ✅ hosted MCP core over Streamable HTTP
 2. ✅ deploy pipeline and docs
-3. ⬜ Postgres mirror — deferred behind stage 4, being an optimisation rather than the critical path.
-   Search Console keeps 16 months and rate-limits at ~1200 queries/minute, so a mirror buys history
-   that Google deletes and answers that cost no quota
+3. ✅ Postgres mirror (`db/002_mirror.sql`, `src/store.ts`)
 4. 🔧 multi-tenant SaaS — in: the schema, sealed credentials, `pg.ts`, `db.ts`, the **Google OAuth
    consent flow** (`google-oauth.ts` — net-new; neither sibling has one, because their tenants hand
    over a password and a Search Console tenant cannot), the tenant resolver (`tenants.ts`), Supabase
    sign-in (`auth.ts`) and the dashboard (`saas.ts`) with `/c/<token>/mcp`. Remaining: legal pages,
    the `ADMIN_EMAILS` operator panel, and Stripe subscriptions.
+
+## The mirror
+
+`gsc_rows` holds grouped daily rows; `gsc_sync` records which `(day, grouping)` pairs were actually
+fetched. Two tables rather than one, because **a day with genuinely zero impressions and a day that
+was never synced look identical in a rows table** — answering from the first while believing the
+second is how a mirror starts lying.
+
+Two judgements live in `store.ts` and both are deliberately conservative:
+
+**When is a day finished?** Google publishes a day ~3 days late and then keeps revising it.
+`FINAL_AFTER_DAYS` is 5 — the lag plus margin — because a provisional day marked final is never
+corrected afterwards. The cost of waiting is one re-fetch; the cost of being wrong is permanent.
+
+**When may the mirror answer?** Only when *every* day in the range is present *and* final, and only
+for an unfiltered web query — it stores grouped totals, so it has nothing to apply a filter to. A
+90%-synced range would answer with 90% of the clicks and no sign anything was missing, and that is
+indistinguishable from a drop in traffic. Everything else falls through to Google, and the tool
+output always names which of the two answered.
+
+Position is averaged **weighted by impressions**, in `store.ts` and `tools.ts` alike. Proven against
+Postgres rather than assumed: two days of one query at 9000 impressions/position 2.0 and 9
+impressions/position 30.0 give 2.028 weighted and 16.000 as a naive mean.
+
+The backfill walks **newest-first** on a small per-account budget, because the quota is per *project*
+and shared by every tenant, and because a sweep starting sixteen months ago leaves "last week"
+missing for hours.
 
 ## Two surfaces, one process
 

@@ -319,6 +319,165 @@ export class Db {
     return (rowCount ?? 0) > 0;
   }
 
+  /** Accounts the backfill sweep should work on: connected, with a property, not deleted. */
+  async connectedAccounts(limit = 100): Promise<Account[]> {
+    const { rows } = await this.q.query(
+      `select ${ACCOUNT_COLS} from public.gsc_accounts a
+        where a.deleted_at is null and a.status = 'connected' and a.property is not null
+        order by a.created_at limit $1`,
+      [limit],
+    );
+    return rows as Account[];
+  }
+
+  // ---------------------------------------------------------------- the mirror
+
+  /**
+   * Write one day's grouped rows, and record that the day was fetched.
+   *
+   * Both halves or neither: a rows write that succeeded while its sync marker failed would look
+   * like an unsynced day forever and be re-fetched every pass, and a sync marker without its rows
+   * would make a real day read as empty. Wrapped in a transaction for that reason alone.
+   *
+   * The rows upsert is ON CONFLICT rather than delete-then-insert because (account, day, dims,
+   * keys) is the primary key — re-syncing a provisional day rewrites exactly the rows it returns.
+   */
+  async putDay(
+    accountId: string,
+    dims: string,
+    day: string,
+    rows: { keys: string[]; clicks: number; impressions: number; position: number }[],
+    final: boolean,
+  ): Promise<void> {
+    await this.q.query('begin');
+    try {
+      for (const r of rows) {
+        await this.q.query(
+          `insert into public.gsc_rows (account_id, day, dims, keys, clicks, impressions, position)
+           values ($1, $2, $3, $4, $5, $6, $7)
+           on conflict (account_id, day, dims, keys)
+           do update set clicks = excluded.clicks, impressions = excluded.impressions, position = excluded.position`,
+          [accountId, day, dims, r.keys, Math.round(r.clicks), Math.round(r.impressions), r.position],
+        );
+      }
+      await this.q.query(
+        `insert into public.gsc_sync (account_id, day, dims, rows, final, synced_at)
+         values ($1, $2, $3, $4, $5, now())
+         on conflict (account_id, day, dims)
+         do update set rows = excluded.rows, final = excluded.final, synced_at = now()`,
+        [accountId, day, dims, rows.length, final],
+      );
+      await this.q.query('commit');
+    } catch (e) {
+      await this.q.query('rollback').catch(() => undefined);
+      throw e;
+    }
+  }
+
+  /**
+   * Which days in a range have been fetched, and which of those are settled.
+   *
+   * `synced` counts fetches, not rows: a day with genuinely zero impressions is synced and empty,
+   * and treating it as missing would re-fetch it forever. That distinction is the whole reason
+   * gsc_sync exists separately from gsc_rows.
+   */
+  async coverage(accountId: string, dims: string, from: string, to: string): Promise<{ synced: number; final: number }> {
+    const { rows } = await this.q.query(
+      `select count(*)::int as synced, count(*) filter (where final)::int as final
+         from public.gsc_sync
+        where account_id = $1 and dims = $2 and day between $3::date and $4::date`,
+      [accountId, dims, from, to],
+    );
+    return { synced: Number(rows[0]?.synced ?? 0), final: Number(rows[0]?.final ?? 0) };
+  }
+
+  /** The days in a range that still need fetching: never synced, or synced while still provisional. */
+  async daysToSync(accountId: string, dims: string, from: string, to: string, limit: number): Promise<string[]> {
+    const { rows } = await this.q.query(
+      `select to_char(d.day, 'YYYY-MM-DD') as day
+         from generate_series($3::date, $4::date, interval '1 day') as d(day)
+         left join public.gsc_sync s
+           on s.account_id = $1 and s.dims = $2 and s.day = d.day
+        where s.day is null or not s.final
+        order by d.day desc
+        limit $5`,
+      [accountId, dims, from, to, limit],
+    );
+    return rows.map((r) => String(r.day));
+  }
+
+  /**
+   * How many days in a range still need fetching. Unlimited, unlike daysToSync.
+   *
+   * Its own query because backfill cannot infer this from the page it fetched: asking for
+   * `budget + 1` days can only ever distinguish "done" from "at least one more", so reporting
+   * progress from it would say "1 day remaining" with four hundred outstanding. A first backfill
+   * runs for days, and a progress number that lies about that is worse than none.
+   */
+  async countDaysToSync(accountId: string, dims: string, from: string, to: string): Promise<number> {
+    const { rows } = await this.q.query(
+      `select count(*)::int as n
+         from generate_series($3::date, $4::date, interval '1 day') as d(day)
+         left join public.gsc_sync s
+           on s.account_id = $1 and s.dims = $2 and s.day = d.day
+        where s.day is null or not s.final`,
+      [accountId, dims, from, to],
+    );
+    return Number(rows[0]?.n ?? 0);
+  }
+
+  /**
+   * Read the mirror for a range, re-grouped across days.
+   *
+   * Position is averaged weighted by impressions, the same way Search Console does it and the same
+   * way tools.ts does — a plain mean over days lets a day with nine impressions at position 2
+   * outweigh one with nine thousand at position 30.
+   */
+  async readMirror(
+    accountId: string,
+    dims: string,
+    from: string,
+    to: string,
+    limit: number,
+  ): Promise<{ keys: string[]; clicks: number; impressions: number; position: number }[]> {
+    const { rows } = await this.q.query(
+      `select keys,
+              sum(clicks)::int as clicks,
+              sum(impressions)::int as impressions,
+              case when sum(impressions) > 0
+                   then sum(position::numeric * impressions) / sum(impressions)
+                   else 0 end as position
+         from public.gsc_rows
+        where account_id = $1 and dims = $2 and day between $3::date and $4::date
+        group by keys
+        order by clicks desc, impressions desc
+        limit $5`,
+      [accountId, dims, from, to, limit],
+    );
+    return rows.map((r) => ({
+      keys: (r.keys as string[]) ?? [],
+      clicks: Number(r.clicks),
+      impressions: Number(r.impressions),
+      position: Number(r.position),
+    }));
+  }
+
+  /** What the mirror holds for an account, for status() and the dashboard. */
+  async mirrorStats(accountId: string): Promise<{ dims: string; days: number; rows: number; oldest: string | null; newest: string | null }[]> {
+    const { rows } = await this.q.query(
+      `select dims,
+              count(*)::int as days,
+              coalesce(sum(rows), 0)::int as rows,
+              to_char(min(day), 'YYYY-MM-DD') as oldest,
+              to_char(max(day), 'YYYY-MM-DD') as newest
+         from public.gsc_sync
+        where account_id = $1
+        group by dims order by dims`,
+      [accountId],
+    );
+    return rows as { dims: string; days: number; rows: number; oldest: string | null; newest: string | null }[];
+  }
+
   // ---------------------------------------------------------------- the operator panel
 
   /**

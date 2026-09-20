@@ -5,6 +5,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { configFromEnv } from '../src/env.ts';
 import { MockGSC, type AnalyticsQuery, type GSC, type InspectionResult } from '../src/gsc.ts';
 import { buildServer, instructions, LAG_DAYS, type Ctx } from '../src/tools.ts';
+import type { Store } from '../src/store.ts';
 
 /** The mock, plus a record of exactly what each tool asked Google for. */
 class RecordingGSC extends MockGSC {
@@ -158,6 +159,106 @@ test('onCall records the outcome of each call without recording what was asked',
   assert.equal(seen[1]!.code, 'bad_date');
   // A search term or a URL in this table would make it a second copy of the customer's traffic.
   for (const s of seen) assert.doesNotMatch(String(s.code), /nonsense/);
+  await c.close();
+});
+
+/** A mirror that can answer, or refuses to, on demand — and records which it was asked. */
+class FakeStore {
+  asked: { dims: string; from: string; to: string }[] = [];
+  reads = 0;
+  answers = true;
+
+  async canAnswer(_a: string, dims: string, from: string, to: string) {
+    this.asked.push({ dims, from, to });
+    return this.answers;
+  }
+  async read() {
+    this.reads++;
+    return [{ keys: ['mirrored term'], clicks: 7, impressions: 100, ctr: 0.07, position: 4.2 }];
+  }
+  async stats() {
+    return [{ dims: 'query', days: 500, rows: 12000, oldest: '2025-01-01', newest: '2026-09-14' }];
+  }
+}
+
+const withMirror = (store: FakeStore, over = {}) => {
+  const ctx = makeCtx({ defaultSite: 'sc-domain:example.com', ...over }, new RecordingGSC());
+  ctx.mirror = { store: store as unknown as Store, accountId: 'acct-1' };
+  return ctx;
+};
+
+test('a fully-synced range is answered from the mirror, and says so', async () => {
+  const store = new FakeStore();
+  const ctx = withMirror(store);
+  const c = await connect(ctx);
+  const { text } = await c.call('search_analytics', { startDate: '2026-01-01', endDate: '2026-01-28' });
+
+  assert.equal(store.reads, 1);
+  assert.match(text, /from the local mirror/, 'the reader must be able to tell where a number came from');
+  assert.match(text, /mirrored term/);
+  // Nothing was spent at Google.
+  assert.equal((ctx.gsc as RecordingGSC).queries.length, 0);
+  await c.close();
+});
+
+test('a partially-synced range falls through to Google rather than under-reporting', async () => {
+  const store = new FakeStore();
+  store.answers = false;
+  const ctx = withMirror(store);
+  const c = await connect(ctx);
+  const { text } = await c.call('search_analytics', { startDate: '2026-01-01', endDate: '2026-01-28' });
+
+  assert.equal(store.reads, 0);
+  assert.match(text, /from Google/);
+  // Answering with 90% of the clicks and no sign anything is missing reads as a traffic drop.
+  assert.equal((ctx.gsc as RecordingGSC).queries.length, 1);
+  await c.close();
+});
+
+test('a filtered or non-web query never touches the mirror', async () => {
+  for (const args of [{ queryFilter: 'ocena' }, { pageFilter: '/blog' }, { countryFilter: 'SVN' }, { deviceFilter: 'MOBILE' as const }, { searchType: 'image' as const }]) {
+    const store = new FakeStore();
+    const ctx = withMirror(store);
+    const c = await connect(ctx);
+    await c.call('search_analytics', { startDate: '2026-01-01', endDate: '2026-01-28', ...args });
+
+    // The mirror stores grouped daily totals: it has nothing to apply a filter to, and nothing at
+    // all for the other search types. It must not even be consulted.
+    assert.equal(store.asked.length, 0, JSON.stringify(args));
+    assert.equal(store.reads, 0, JSON.stringify(args));
+    assert.equal((ctx.gsc as RecordingGSC).queries.length, 1, JSON.stringify(args));
+    await c.close();
+  }
+});
+
+test('the mirror is asked about exactly the grouping and range that was requested', async () => {
+  const store = new FakeStore();
+  const c = await connect(withMirror(store));
+  await c.call('search_analytics', { dimensions: 'query,page', startDate: '2026-02-01', endDate: '2026-02-07' });
+  assert.deepEqual(store.asked, [{ dims: 'query,page', from: '2026-02-01', to: '2026-02-07' }]);
+  await c.close();
+});
+
+test('status surfaces how far back the mirror reaches, and the instructions say it exists', async () => {
+  const store = new FakeStore();
+  const ctx = withMirror(store);
+  const c = await connect(ctx);
+  const st = JSON.parse((await c.call('status')).text);
+
+  assert.equal(st.mirror[0].oldest, '2025-01-01');
+  // Without this nobody would think to ask for anything older than Google's 16 months, which is
+  // the entire reason the mirror exists.
+  assert.match(instructions(ctx), /keeps its own copy/);
+  await c.close();
+});
+
+test('with no mirror configured, nothing mentions one', async () => {
+  const ctx = makeCtx({ defaultSite: 'sc-domain:example.com' });
+  const c = await connect(ctx);
+  const st = JSON.parse((await c.call('status')).text);
+  assert.equal(st.mirror, null);
+  assert.doesNotMatch(instructions(ctx), /keeps its own copy/);
+  assert.match((await c.call('search_analytics')).text, /from Google/);
   await c.close();
 });
 

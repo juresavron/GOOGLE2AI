@@ -112,6 +112,7 @@ app.get('/status', (_req, res) => {
 // person carries a session cookie, a connector carries its own revocable token.
 let pgHandle: Awaited<ReturnType<typeof import('./pg.ts').connectPg>> | null = null;
 let reaper: NodeJS.Timeout | null = null;
+let mirrorTimer: NodeJS.Timeout | null = null;
 
 if (saasReady) {
   if (!masterKey) {
@@ -141,14 +142,32 @@ if (saasReady) {
   const tenants = new Tenants(cfg, pgHandle.db, oauth, log, masterKey);
   mountSaas(app, { cfg, auth: new Auth(cfg.supabaseUrl, cfg.supabaseAnonKey), db: pgHandle.db, tenants, oauth, masterKey, log });
 
-  // Interrupted deletes: a row tombstoned but its Google grant not yet revoked. Started only once
-  // the database is usable, through the latch, which runs it immediately if it already is.
+  // Two background passes, started only once the database is usable — through the latch, which
+  // runs them immediately if it already is. Registering after the connection is up is the normal
+  // case, not a missed event; see readyLatch in pg.ts for what the callback form cost.
   pgHandle.health.onReady(() => {
     if (reaper) return;
+
+    // Interrupted deletes: a row tombstoned but its Google grant not yet revoked.
     const sweep = () => void tenants.reap().catch((e) => log.error({ err: String(e) }, 'reaper failed'));
     sweep();
     reaper = setInterval(sweep, 10 * 60_000);
     reaper.unref?.();
+
+    // The mirror. Every day it runs is a day of history that outlives Google's 16-month window,
+    // so it is off only if explicitly disabled.
+    if (process.env.GSC_MIRROR !== 'off') {
+      const backfill = () =>
+        void tenants
+          .syncPass()
+          .then((r) => {
+            if (r.days) log.info(r, 'mirror backfill');
+          })
+          .catch((e) => log.error({ err: String(e) }, 'mirror backfill failed'));
+      backfill();
+      mirrorTimer = setInterval(backfill, 15 * 60_000);
+      mirrorTimer.unref?.();
+    }
   });
 } else {
   log.info('single-account mode — set SUPABASE_URL, SUPABASE_ANON_KEY and DATABASE_URL for the multi-account build');
@@ -220,6 +239,7 @@ const httpServer = app.listen(cfg.port, cfg.host, () => {
 const shutdown = (sig: string) => {
   log.info({ sig }, 'shutting down');
   if (reaper) clearInterval(reaper);
+  if (mirrorTimer) clearInterval(mirrorTimer);
   void pgHandle?.close().catch(() => undefined);
   httpServer.close(() => process.exit(0));
   // A connection that never closes must not hold the process past the platform's grace period; Fly

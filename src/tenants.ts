@@ -15,6 +15,7 @@ import { GoogleGSC, type GSC } from './gsc.ts';
 import type { GoogleOAuth } from './google-oauth.ts';
 import { open as unseal } from './secrets.ts';
 import type { McpResolution } from './mcp.ts';
+import { Store } from './store.ts';
 import type { Ctx } from './tools.ts';
 
 export const tokenHash = (token: string): string => crypto.createHash('sha256').update(token).digest('hex');
@@ -44,6 +45,7 @@ export class Tenants {
   private readonly maxCalls: number;
   private readonly ttlMs: number;
   private readonly maxEntries: number;
+  readonly store: Store;
 
   /**
    * Built clients, by account.
@@ -68,6 +70,7 @@ export class Tenants {
     this.maxCalls = opts.maxCallsPerMinute ?? Number(process.env.MAX_CALLS_PER_MINUTE || 120);
     this.ttlMs = opts.ttlMs ?? 5 * 60_000;
     this.maxEntries = opts.maxEntries ?? 500;
+    this.store = new Store(db);
   }
 
   /** Drop a cached client — after a revocation, a delete, or fresh consent replacing the token. */
@@ -189,11 +192,51 @@ export class Tenants {
       // account rather than to a service.
       cfg: { ...this.cfg, defaultSite: account.property },
       gsc,
+      // The mirror is keyed by account, so it only exists on this surface. The single-account
+      // server has no database and no account id, and asks Google every time.
+      mirror: { store: this.store, accountId: account.id },
       onCall: (call) => {
         void this.db.recordCall(account.id, call).catch((e) => this.log.error({ err: String(e) }, 'could not record a tool call'));
       },
     };
     return ctx;
+  }
+
+  /**
+   * One pass of the backfill, across every connected account.
+   *
+   * The budget is per account and small on purpose: Search Console's quota is per PROJECT and
+   * shared by every tenant here, so one account's first backfill — which is sixteen months, close
+   * to five hundred calls — must not be able to spend all of it. Sixteen months at this budget
+   * takes a few hours of passes, and the days that matter are fetched first because backfill()
+   * walks newest-first.
+   */
+  async syncPass(dims = 'query', perAccount = 10): Promise<{ accounts: number; days: number; remaining: number }> {
+    const accounts = await this.db.connectedAccounts();
+    const to = this.store.earliestFetchable();
+    let days = 0;
+    let remaining = 0;
+    let touched = 0;
+
+    for (const a of accounts) {
+      if (!a.property) continue;
+      const gsc = await this.clientFor(a);
+      if (!gsc) continue;
+      try {
+        // Ends five days back rather than today: a day inside the lag window would be stored
+        // provisional and immediately re-fetched, spending quota to learn nothing.
+        const end = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10);
+        const r = await this.store.backfill(a.id, gsc, a.property, dims, to, end, perAccount);
+        days += r.days;
+        remaining += r.remaining;
+        if (r.days) touched++;
+      } catch (e) {
+        // One account's credential failing must not stop the sweep for everyone else. It is
+        // already recorded on the row by the tool path; here it is only logged.
+        this.log.warn({ account: a.id, err: String(e instanceof Error ? e.message : e) }, 'backfill failed for one account');
+      }
+    }
+    return { accounts: touched, days, remaining };
   }
 
   /**

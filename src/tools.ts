@@ -5,12 +5,18 @@ import { z } from 'zod';
 import type { Config } from './env.ts';
 import { authKind } from './env.ts';
 import type { AnalyticsRow, GSC, SiteEntry } from './gsc.ts';
+import type { Store } from './store.ts';
 
 export const VERSION = '0.1.0';
 
 export interface Ctx {
   cfg: Config;
   gsc: GSC;
+  /**
+   * The local mirror, on the multi-tenant build. Present only where there is a database and an
+   * account to key it by; the single-account server has neither and simply asks Google every time.
+   */
+  mirror?: { store: Store; accountId: string };
   /**
    * Called after every tool call, with what happened and nothing about what was asked. Set by the
    * supervisor on the multi-tenant build, where it writes a usage row; unset on the single-account
@@ -109,7 +115,7 @@ export function instructions(ctx: Ctx): string {
   return `Google Search Console, read-only.${bound}
 Properties are addressed exactly as Search Console spells them: "sc-domain:example.com" for a domain property, "https://example.com/" (with the trailing slash) for a URL-prefix one. list_sites is the authority on which exist${cfg.defaultSite ? '' : ' — call it first, since no property is configured as the default'}.
 Start with search_analytics for what people searched and where the site ranked, compare_periods for whether that is getting better or worse, inspect_url for why one page is or is not in the index, list_sitemaps for whether Google is reading the sitemap at all.
-SEARCH CONSOLE IS ${LAG_DAYS} DAYS BEHIND. There is no data for today or yesterday, and the last two days of any range are incomplete and will rise later. Ranges left unset end ${LAG_DAYS} days ago for that reason; a range that ends today is not an error but its tail is not real. Data older than 16 months does not exist at all.
+SEARCH CONSOLE IS ${LAG_DAYS} DAYS BEHIND. There is no data for today or yesterday, and the last two days of any range are incomplete and will rise later. Ranges left unset end ${LAG_DAYS} days ago for that reason; a range that ends today is not an error but its tail is not real. Data older than 16 months does not exist at Google at all${ctx.mirror ? ', but this connector keeps its own copy of what it has already seen — status() says how far back that reaches, and a range inside it is answered from there without spending API quota' : ''}.
 Times are ${cfg.tz}. This connector cannot submit URLs, change settings or write anything — every tool reads.`;
 }
 
@@ -168,8 +174,11 @@ export function buildServer(ctx: Ctx): McpServer {
 
   // ------------------------------------------------------------------ tools
 
-  tool('status', 'Credentials, reachability and which properties are visible. Call this first if other tools fail.', {}, () => {
+  tool('status', 'Credentials, reachability, which properties are visible, and how much history the local mirror holds. Call this first if other tools fail.', {}, async () => {
     const st = gsc.status();
+    // What the mirror holds is the only way to know that history older than Google's 16 months is
+    // available at all — without it nobody would think to ask for it.
+    const mirror = ctx.mirror ? await ctx.mirror.store.stats(ctx.mirror.accountId).catch(() => null) : null;
     return json({
       ...st,
       default_site: cfg.defaultSite || null,
@@ -177,6 +186,7 @@ export function buildServer(ctx: Ctx): McpServer {
       reporting_lag_days: LAG_DAYS,
       latest_complete_date: defaultEnd(),
       writes_possible: false,
+      mirror: mirror?.length ? mirror : null,
       version: VERSION,
     });
   });
@@ -214,15 +224,37 @@ export function buildServer(ctx: Ctx): McpServer {
       parseDay(startDate);
       parseDay(endDate);
       const dimensions = (a.dimensions ?? 'query').split(',').map((d) => d.trim()).filter(Boolean);
-      const rows = await gsc.searchAnalytics({
-        siteUrl: site(a.siteUrl),
-        startDate,
-        endDate,
-        dimensions,
-        rowLimit: Math.min(a.rowLimit ?? 100, cfg.maxRows),
-        searchType: a.searchType ?? 'web',
-        filters: filters(a),
-      });
+      const rowLimit = Math.min(a.rowLimit ?? 100, cfg.maxRows);
+      const f = filters(a);
+
+      /**
+       * The mirror answers only when it can answer COMPLETELY, and only for an unfiltered,
+       * web-search query — it stores grouped totals per day, so it has nothing to apply a filter
+       * to and nothing for the other search types. Everything else falls through to Google.
+       *
+       * A partial answer from here would under-report, and under-reporting is indistinguishable
+       * from a drop in traffic to whoever reads it.
+       */
+      let rows: AnalyticsRow[] | null = null;
+      let source = 'Google';
+      const mirrorable = ctx.mirror && !f.length && (a.searchType ?? 'web') === 'web';
+      if (mirrorable && (await ctx.mirror!.store.canAnswer(ctx.mirror!.accountId, dimensions.join(','), startDate, endDate))) {
+        rows = await ctx.mirror!.store.read(ctx.mirror!.accountId, dimensions.join(','), startDate, endDate, rowLimit);
+        source = 'the local mirror';
+      }
+
+      if (!rows) {
+        rows = await gsc.searchAnalytics({
+          siteUrl: site(a.siteUrl),
+          startDate,
+          endDate,
+          dimensions,
+          rowLimit,
+          searchType: a.searchType ?? 'web',
+          filters: f,
+        });
+      }
+
       if (!rows.length) return text(`No data for ${startDate} → ${endDate}. If that range ends within the last ${LAG_DAYS} days, Search Console has not published it yet.`);
       const t = totals(rows);
       const body = table(
@@ -230,7 +262,7 @@ export function buildServer(ctx: Ctx): McpServer {
         rows.map((r) => [...r.keys, String(r.clicks), String(r.impressions), pct(r.ctr), pos(r.position)]),
       );
       return text(
-        `${startDate} → ${endDate} · ${rows.length} rows · totals: ${t.clicks} clicks, ${t.impressions} impressions, ${pct(t.ctr)} CTR, position ${pos(t.position)}\n\n${body}`,
+        `${startDate} → ${endDate} · ${rows.length} rows · from ${source} · totals: ${t.clicks} clicks, ${t.impressions} impressions, ${pct(t.ctr)} CTR, position ${pos(t.position)}\n\n${body}`,
       );
     },
   );
