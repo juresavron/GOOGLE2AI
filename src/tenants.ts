@@ -87,6 +87,41 @@ export class Tenants {
     }
   }
 
+  /**
+   * A client for an account the caller already owns, bypassing the token lookup.
+   *
+   * The dashboard needs this to show which properties a fresh consent actually grants — a list that
+   * must be asked of Google live, because it is exactly what the user is about to choose from and a
+   * stale one would offer a property the credential cannot read. It shares the same cache as
+   * resolve(), so opening the dashboard does not cost an extra token exchange.
+   *
+   * It takes an Account the caller fetched under a user id, so the ownership check has already
+   * happened; there is no path from a request parameter to this method.
+   */
+  async clientFor(account: { id: string; quota_project: string | null }): Promise<GSC | null> {
+    const hit = this.cache.get(account.id);
+    if (hit && Date.now() - hit.at < this.ttlMs) return hit.gsc;
+
+    const sealed = await this.db.getSecret(account.id);
+    if (!sealed) return null;
+    let refreshToken: string;
+    try {
+      refreshToken = unseal(this.masterKey, account.id, sealed);
+    } catch (e) {
+      this.log.error({ account: account.id, err: String(e instanceof Error ? e.message : e) }, 'could not unseal a tenant credential');
+      return null;
+    }
+    const gsc = new GoogleGSC(this.cfg, {
+      clientId: this.cfg.clientId,
+      clientSecret: this.cfg.clientSecret,
+      refreshToken,
+      quotaProject: account.quota_project || this.cfg.quotaProject,
+    });
+    this.cache.set(account.id, { gsc, at: Date.now() });
+    this.sweep();
+    return gsc;
+  }
+
   async resolve(token: string): Promise<McpResolution> {
     if (!token) return null;
     const row = await this.db.connectorByToken(tokenHash(token));

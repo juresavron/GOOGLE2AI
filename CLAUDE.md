@@ -115,10 +115,35 @@ bypasses RLS, so those joins are the real enforcement for everything in this fil
 3. ⬜ Postgres mirror — deferred behind stage 4, being an optimisation rather than the critical path.
    Search Console keeps 16 months and rate-limits at ~1200 queries/minute, so a mirror buys history
    that Google deletes and answers that cost no quota
-4. 🔧 multi-tenant SaaS — schema, sealed credentials, `pg.ts` and `db.ts` are in. Remaining: the
-   **Google OAuth consent flow** (net-new; neither sibling has one, because their tenants hand over
-   a password and a Search Console tenant cannot), tenants + supervisor, Supabase sign-in, the
-   dashboard, landing and legal pages, the operator panel, and `/c/<token>/mcp`.
+4. 🔧 multi-tenant SaaS — in: the schema, sealed credentials, `pg.ts`, `db.ts`, the **Google OAuth
+   consent flow** (`google-oauth.ts` — net-new; neither sibling has one, because their tenants hand
+   over a password and a Search Console tenant cannot), the tenant resolver (`tenants.ts`), Supabase
+   sign-in (`auth.ts`) and the dashboard (`saas.ts`) with `/c/<token>/mcp`. Remaining: legal pages,
+   the `ADMIN_EMAILS` operator panel, and Stripe subscriptions.
+
+## Two surfaces, one process
+
+```
+operator (always)    /<MCP_SECRET>/{mcp,setup}      one account, the secret IS the login
+tenant   (optional)  /, /login, /app, /c/<t>/mcp    many accounts, a real sign-in
+```
+
+The tenant surface appears only when `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `DATABASE_URL` are all
+set, and it **refuses to start without `MASTER_KEY`** — starting would mean storing every tenant's
+Google refresh token in the clear, on a server that looks healthy right up until the database leaks.
+
+They are genuinely separate products sharing a process, and `tests/saas.test.ts` holds them to it:
+with Postgres unreachable, the operator connector still answers and `/healthz` still reports.
+
+**CSRF.** There are no tokens on these forms, deliberately rather than by omission. The session
+cookie is `SameSite=Lax`, so a cross-site POST does not carry it, and every mutating route is a
+POST. The one GET that changes anything is Google's callback, which has its own cookie-bound state
+check — and that cookie is `Lax` too, not `Strict`, because Google's callback is a top-level
+cross-site GET and `Strict` would withhold it on exactly that navigation.
+
+**`PUBLIC_ORIGIN`, not the Host header.** The Google redirect URI is built from configuration. A
+Host header is attacker-controlled, and deriving the redirect from one would let a forged request
+send a consent somewhere else.
 
 ## Provenance
 

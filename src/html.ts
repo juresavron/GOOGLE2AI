@@ -37,3 +37,20 @@ const STYLE =
 export const page = (title: string, body: string): string =>
   `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
   `<title>${esc(title)}</title></head><body style="${STYLE}">${body}</body></html>`;
+
+/**
+ * Every line of client-side script these pages have, served as one file from the same origin.
+ *
+ * A file rather than inline handlers, which is what lets the CSP refuse inline script outright: with
+ * 'unsafe-inline' any HTML injection on a page runs, and these pages carry same-origin POST routes
+ * that mint a connector URL and delete an account. It is also why the delete button carries
+ * data-confirm="..." instead of onsubmit="confirm(...)" — an attribute has two nested parsing
+ * contexts and esc() only handles the outer one, so a label containing an apostrophe broke the
+ * button in whatsapp2ai exactly that way.
+ */
+export const APP_JS = `(function () {
+  document.addEventListener('submit', function (e) {
+    var f = e.target;
+    if (f && f.dataset && f.dataset.confirm && !window.confirm(f.dataset.confirm)) e.preventDefault();
+  });
+})();`;

@@ -13,7 +13,7 @@ import pino from 'pino';
 import { authKind, configFromEnv, loadDotenv } from './env.ts';
 import { GoogleGSC, MockGSC } from './gsc.ts';
 import type { GSC } from './gsc.ts';
-import { esc, page, SECURITY_HEADERS } from './html.ts';
+import { APP_JS, esc, page, SECURITY_HEADERS } from './html.ts';
 import { mountMcp } from './mcp.ts';
 import { LAG_DAYS, VERSION, type Ctx } from './tools.ts';
 
@@ -29,6 +29,11 @@ const COMMIT = (process.env.GIT_SHA ?? '').slice(0, 7);
 const gsc: GSC = cfg.mock ? new MockGSC() : new GoogleGSC(cfg);
 if (cfg.mock) log.warn('GSC_MOCK=1 — not calling Google, serving seeded demo data');
 const ctx: Ctx = { cfg, gsc };
+
+// The tenant surface appears only when all three are set. Without them this is the single-account
+// server it has always been, with no login and no database to go wrong.
+const saasReady = Boolean(cfg.supabaseUrl && cfg.supabaseAnonKey && cfg.databaseUrl);
+const masterKey = process.env.MASTER_KEY || '';
 
 // One probe at boot, not awaited: it turns /healthz from "the process is up" into "the credentials
 // work", which is the thing a deploy actually needs to know. Listening must not wait on Google, so
@@ -53,6 +58,15 @@ app.use((_req, res, next) => {
 // The one place a request body is capped. The MCP transport receives an already-parsed body and has
 // no size option of its own. A Search Console request is small; a megabyte is already generous.
 app.use(express.json({ limit: '1mb' }));
+// The dashboard's forms. Small on purpose: nothing here posts anything but a label, a property and
+// a button press.
+app.use(express.urlencoded({ extended: false, limit: '32kb' }));
+
+// The only script any page loads, and the reason the CSP can refuse inline script. Public and
+// immutable: it contains no secrets and no per-user anything.
+app.get('/app.js', (_req, res) => {
+  res.type('application/javascript').set('Cache-Control', 'public, max-age=3600').send(APP_JS);
+});
 
 // ---------------------------------------------------------------- public endpoints
 
@@ -85,10 +99,60 @@ app.get('/status', (_req, res) => {
     healthy: !st.error,
     writes_possible: false,
     reporting_lag_days: LAG_DAYS,
-    multi_tenant: cfg.supabaseUrl && cfg.supabaseAnonKey && cfg.databaseUrl ? 'configured' : 'off',
+    // Tells "the database is misconfigured" from "the dashboard is broken", without saying which —
+    // the reason is in the logs, where it belongs.
+    multi_tenant: !saasReady ? 'off' : pgHandle?.health.ready() ? 'ready' : 'database-unavailable',
     properties: st.sites,
   });
 });
+
+// ---------------------------------------------------------------- tenant surface
+
+// Mounted BEFORE the secret guard, because /login, /app and /c/<token>/mcp are not secret-scoped: a
+// person carries a session cookie, a connector carries its own revocable token.
+let pgHandle: Awaited<ReturnType<typeof import('./pg.ts').connectPg>> | null = null;
+let reaper: NodeJS.Timeout | null = null;
+
+if (saasReady) {
+  if (!masterKey) {
+    // Refused rather than warned: without it every consent would be stored unsealed, and a server
+    // that starts here would look healthy right up until the database leaked.
+    log.fatal('MASTER_KEY is not set, and the multi-tenant build cannot store credentials without it. Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"');
+    process.exit(1);
+  }
+
+  const [{ connectPg }, { Auth }, { GoogleOAuth }, { Tenants }, { mountSaas }] = await Promise.all([
+    import('./pg.ts'),
+    import('./auth.ts'),
+    import('./google-oauth.ts'),
+    import('./tenants.ts'),
+    import('./saas.ts'),
+  ]);
+
+  pgHandle = await connectPg(cfg.databaseUrl, log);
+
+  // Must match a redirect URI registered on the OAuth client exactly, so it is built from one
+  // configured origin rather than from the request — a Host header is attacker-controlled, and
+  // deriving it from one would let a forged request send the consent somewhere else.
+  const origin = (process.env.PUBLIC_ORIGIN || '').replace(/\/+$/, '');
+  if (!origin) log.warn('PUBLIC_ORIGIN is not set — the Google redirect URI cannot be built, so connecting an account will fail');
+  const oauth = new GoogleOAuth(cfg.clientId, cfg.clientSecret, `${origin}/oauth/google/callback`);
+
+  const tenants = new Tenants(cfg, pgHandle.db, oauth, log, masterKey);
+  mountSaas(app, { cfg, auth: new Auth(cfg.supabaseUrl, cfg.supabaseAnonKey), db: pgHandle.db, tenants, oauth, masterKey, log });
+
+  // Interrupted deletes: a row tombstoned but its Google grant not yet revoked. Started only once
+  // the database is usable, through the latch, which runs it immediately if it already is.
+  pgHandle.health.onReady(() => {
+    if (reaper) return;
+    const sweep = () => void tenants.reap().catch((e) => log.error({ err: String(e) }, 'reaper failed'));
+    sweep();
+    reaper = setInterval(sweep, 10 * 60_000);
+    reaper.unref?.();
+  });
+} else {
+  log.info('single-account mode — set SUPABASE_URL, SUPABASE_ANON_KEY and DATABASE_URL for the multi-account build');
+}
 
 // ---------------------------------------------------------------- the secret guard
 
@@ -140,18 +204,23 @@ app.get('/:secret/setup', (req, res) => {
   );
 });
 
-app.get('/', (_req, res) => {
-  res.type('html').send(page('GOOGLE2AI', `<h1>GOOGLE2AI</h1><p>A Model Context Protocol server for Google Search Console. The connector lives at a secret path; if you are the operator, you know it.</p>`));
-});
+// Only on the single-account build: with the tenant surface mounted, / is its landing page.
+if (!saasReady) {
+  app.get('/', (_req, res) => {
+    res.type('html').send(page('GOOGLE2AI', `<h1>GOOGLE2AI</h1><p>A Model Context Protocol server for Google Search Console. The connector lives at a secret path; if you are the operator, you know it.</p>`));
+  });
+}
 
 // ---------------------------------------------------------------- lifecycle
 
 const httpServer = app.listen(cfg.port, cfg.host, () => {
-  log.info({ host: cfg.host, port: cfg.port, mock: cfg.mock, auth: gsc.status().auth, defaultSite: cfg.defaultSite || null }, `GOOGLE2AI v${VERSION} listening`);
+  log.info({ host: cfg.host, port: cfg.port, mock: cfg.mock, auth: gsc.status().auth, defaultSite: cfg.defaultSite || null, tenantSurface: saasReady }, `GOOGLE2AI v${VERSION} listening`);
 });
 
 const shutdown = (sig: string) => {
   log.info({ sig }, 'shutting down');
+  if (reaper) clearInterval(reaper);
+  void pgHandle?.close().catch(() => undefined);
   httpServer.close(() => process.exit(0));
   // A connection that never closes must not hold the process past the platform's grace period; Fly
   // sends SIGKILL after it, and a half-closed listener is a failed deploy that looks like a hang.
