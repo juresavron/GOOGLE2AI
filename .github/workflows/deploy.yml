@@ -54,8 +54,14 @@ jobs:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: postgres
         ports: ['5432:5432']
+        # -U/-d are not decoration: bare `pg_isready` probes as the runner's own user, which this
+        # image has no role for. It logs `FATAL: role "root" does not exist` on every probe and
+        # still reports healthy, because pg_isready counts a REJECTED connection as "server is
+        # up". So the check would pass on a container whose credentials were wrong, and the real
+        # failure would surface later as an unexplained step error.
         options: >-
-          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
 
     steps:
       - uses: actions/checkout@v4
