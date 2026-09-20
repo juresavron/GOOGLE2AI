@@ -212,6 +212,24 @@ test('the tenant build refuses to start with no MASTER_KEY', async () => {
 
   const code = await new Promise<number>((resolve) => proc.on('exit', (c) => resolve(c ?? -1)));
   assert.equal(code, 1, 'it must exit, not warn and carry on');
-  assert.match(out, /MASTER_KEY/);
+  assert.match(out, /MASTER_KEY is not set/);
+});
+
+test('the tenant build also refuses to start with a MALFORMED MASTER_KEY', async () => {
+  // The case that reached production: present, so the old `if (!masterKey)` check passed, the
+  // server booted looking healthy, and it threw on the first consent — AFTER Google had already
+  // authorised the user, who then saw a failure they could do nothing about.
+  const proc = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'src/index.ts'], {
+    cwd: ROOT,
+    env: { ...process.env, ...SAAS_ENV, MASTER_KEY: 'too-short-to-be-a-key', PORT: '19998', LOG_LEVEL: 'fatal' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  proc.stdout?.on('data', (b) => (out += String(b)));
+  proc.stderr?.on('data', (b) => (out += String(b)));
+
+  const code = await new Promise<number>((resolve) => proc.on('exit', (c) => resolve(c ?? -1)));
+  assert.equal(code, 1, 'a wrong-shaped key must fail at BOOT, not at the first consent');
+  assert.match(out, /must be exactly 32/);
   assert.match(out, /randomBytes\(32\)/, 'and say how to make one');
 });

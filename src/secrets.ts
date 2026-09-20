@@ -71,6 +71,40 @@ const open1 = (key: Buffer, nonce: Buffer, body: Buffer, aad?: Buffer) => {
   return Buffer.concat([d.update(body.subarray(0, body.length - 16)), d.final()]);
 };
 
+/**
+ * Check the key at STARTUP, not at first use.
+ *
+ * The boot check used to be `if (!MASTER_KEY) exit`, which only catches an absent key. A key that
+ * is present but the wrong shape — too short, a password someone typed, a value truncated on
+ * paste — passed that test, booted a server that looked entirely healthy, and then threw on the
+ * first consent, AFTER Google had already authorised the user. The tenant sees "connected to
+ * Google" followed by a failure they cannot act on, and the operator sees a green deploy.
+ *
+ * Returns the problem as a sentence, or null when the key is usable. Deliberately not a boolean:
+ * "MASTER_KEY is wrong" is not an actionable thing to read at 3am.
+ */
+export function checkMasterKey(raw: string): string | null {
+  const s = (raw ?? '').trim();
+  if (!s) return 'MASTER_KEY is not set.';
+  // Base64url decoding is lenient — it drops characters it does not recognise rather than
+  // failing — so a key with stray characters decodes to a SHORTER buffer instead of an error, and
+  // the length check below is what actually catches it.
+  const key = unb64(s);
+  if (key.length !== KEY_BYTES) {
+    return `MASTER_KEY decodes to ${key.length} bytes and must be exactly ${KEY_BYTES}. It should be ${KEY_BYTES} random bytes in base64url, which is 43 characters with no padding. Generate one with: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`;
+  }
+  // Prove it round-trips rather than trusting the length. Cheap, and it is the actual property
+  // every consent depends on.
+  try {
+    const probe = 'startup-probe';
+    const id = '00000000-0000-4000-8000-000000000000';
+    if (open(s, id, seal(s, id, probe)) !== probe) return 'MASTER_KEY did not round-trip a test value.';
+  } catch (e) {
+    return `MASTER_KEY is unusable: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  return null;
+}
+
 /** Seal a secret for one account. `accountId` is bound in and must be passed back to open it. */
 export function seal(master: string, accountId: string, secret: string): Sealed {
   const mk = masterKey(master);

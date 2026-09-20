@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { CryptoError, generateMasterKey, open, seal, VERSION } from '../src/secrets.ts';
+import { checkMasterKey, CryptoError, generateMasterKey, open, seal, VERSION } from '../src/secrets.ts';
 
 const MASTER = generateMasterKey();
 const ACCOUNT = '11111111-1111-4111-8111-111111111111';
@@ -78,4 +78,31 @@ test('empty and unicode secrets round-trip', () => {
   for (const secret of ['', 'ключ', '🔑 ključ', 'x'.repeat(4096)]) {
     assert.equal(open(MASTER, ACCOUNT, seal(MASTER, ACCOUNT, secret)), secret);
   }
+});
+
+
+test('checkMasterKey catches a key that is present but the wrong shape', () => {
+  assert.equal(checkMasterKey(generateMasterKey()), null, 'a real key passes');
+  assert.equal(checkMasterKey(`  ${generateMasterKey()}  `), null, 'whitespace on paste is tolerated');
+
+  assert.match(String(checkMasterKey('')), /not set/);
+  assert.match(String(checkMasterKey('   ')), /not set/);
+
+  // The case that actually happened: set, non-empty, boots fine, then throws on the first consent
+  // AFTER Google has authorised the user. Base64url decoding is lenient, so a short or malformed
+  // value decodes to fewer bytes rather than failing — the length check is what catches it.
+  for (const bad of ['hunter2', 'dG9vLXNob3J0', generateMasterKey().slice(0, 20)]) {
+    const problem = checkMasterKey(bad);
+    assert.ok(problem, `"${bad}" must be rejected`);
+    assert.match(problem, /must be exactly 32/);
+    assert.match(problem, /43 characters/, 'says what a correct one looks like');
+    assert.match(problem, /randomBytes\(32\)/, 'and how to make one');
+  }
+});
+
+test('checkMasterKey proves a round-trip, not just a length', () => {
+  // 32 bytes of the right length that still cannot seal would pass a length check alone.
+  const real = generateMasterKey();
+  assert.equal(checkMasterKey(real), null);
+  assert.equal(open(real, 'id', seal(real, 'id', 'x')), 'x');
 });

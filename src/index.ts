@@ -115,10 +115,14 @@ let reaper: NodeJS.Timeout | null = null;
 let mirrorTimer: NodeJS.Timeout | null = null;
 
 if (saasReady) {
-  if (!masterKey) {
-    // Refused rather than warned: without it every consent would be stored unsealed, and a server
-    // that starts here would look healthy right up until the database leaked.
-    log.fatal('MASTER_KEY is not set, and the multi-tenant build cannot store credentials without it. Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"');
+  // Refused rather than warned, and the SHAPE is checked rather than mere presence: without a
+  // usable key every consent would be stored unsealed, and a server that starts here would look
+  // healthy right up until the database leaked — or, as actually happened, until the first tenant
+  // finished consenting at Google and could not be given a connector.
+  const { checkMasterKey } = await import('./secrets.ts');
+  const keyProblem = checkMasterKey(masterKey);
+  if (keyProblem) {
+    log.fatal(`${keyProblem} The multi-tenant build cannot store credentials without a usable MASTER_KEY.`);
     process.exit(1);
   }
 
