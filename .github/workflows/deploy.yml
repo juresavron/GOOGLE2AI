@@ -3,9 +3,13 @@
 # building one of these was never the bugs, it was not knowing whether the live server had the fix.
 #
 # ONE-TIME SETUP, and the first step is not optional:
-#   1. Fly dashboard -> google2ai -> detach the GitHub repo.
-#      While the repo is attached, FLY DEPLOYS TOO, and two pipelines releasing the same app
+#   1. Fly dashboard -> google2ai -> Settings -> detach the GitHub repo.
+#      NOT OPTIONAL, and not theoretical: this app was launched from Fly's web UI, so the repo IS
+#      currently attached. While it is, FLY DEPLOYS TOO, and two pipelines releasing the same app
 #      concurrently fails with "failed to acquire lease ... held by ...@tokens.fly.io".
+#      Fly's launcher also rewrote fly.toml on its way through, changing internal_port to 8080
+#      while leaving PORT at 8000 -- an app that listened on one port while the proxy knocked on
+#      the other, with no diagnosable symptom. This workflow deploys the repo's own config.
 #   2. fly tokens create deploy -a google2ai
 #   3. GitHub -> Settings -> Secrets and variables -> Actions -> new secret
 #      Name: FLY_API_TOKEN   Value: the token
@@ -14,9 +18,16 @@ name: deploy
 
 on:
   push:
-    # main ONLY. Listing the working branch too would double every deploy, and the concurrency group
-    # below would then cancel one of them, possibly after machines had started rolling.
-    branches: [main]
+    # main, AND the working branch -- because this repository has no main yet. Its first commit went
+    # to claude/blissful-thompson-dhddf5, so a main-only trigger meant this workflow had never run
+    # once, which is why the first deploy had to go through Fly's web launcher and arrived with a
+    # rewritten fly.toml and a port mismatch.
+    #
+    # DROP THE SECOND ENTRY the moment main exists. Listing both would double every deploy, and the
+    # concurrency group below would cancel one of them -- possibly after machines had started
+    # rolling.
+    branches: [main, claude/blissful-thompson-dhddf5]
+  # Lets a deploy be started by hand from the Actions tab, without pushing anything.
   workflow_dispatch: {}
 
 concurrency:
