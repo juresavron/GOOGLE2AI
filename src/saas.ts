@@ -256,6 +256,11 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     if (!user) return;
 
     const accounts = await db.listAccounts(user.id);
+    // The deployment half of the write gate, so this page can say whether a tenant's own switch
+    // actually does anything. NOT cfg.allowWrite: that is the OPERATOR connector's switch and has
+    // governed nothing on this surface since db/006_settings.sql. Reading the wrong one here would
+    // have the dashboard tell a tenant writes are off while their connector happily wrote.
+    const deploymentWrite = await db.getSettings().then((x) => x.allow_write).catch(() => false);
     const msg = typeof req.query.m === 'string' ? req.query.m : '';
     const err = typeof req.query.e === 'string' ? req.query.e : '';
 
@@ -327,8 +332,9 @@ export function mountSaas(app: Express, d: SaasDeps): void {
                      ${stat({ label: 'Connector URLs', value: tokens.length })}
                      ${stat({ label: 'Writing', value: a.allow_write ? 'On' : 'Off', state: a.allow_write ? 'pending' : 'info' })}
                    </div>` +
-                    (a.allow_write && !cfg.allowWrite
-                      ? `<p class="micro">On for this account, but off server-wide — the tools will still refuse.</p>`
+                    (a.allow_write && !deploymentWrite
+                      ? `<p class="micro">On for this account, but writing is off for this deployment, so the tools will still
+                           refuse. Only the operator can change that.</p>`
                       : '') +
                     `<div class="acts">
                        <form method="post" action="/app/accounts/${id}/tokens" class="rowform"><button type="submit">New connector URL</button></form>
@@ -487,14 +493,17 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     // enabled — or refused — for up to the cache TTL after the button said otherwise.
     tenants.forget(id);
     if (!ok) return noSuchAccount(res);
+    // Same read as the dashboard's, and for the same reason: a tenant turning their own switch on
+    // needs to know whether anything actually changed.
+    const deploymentWrite = await db.getSettings().then((x) => x.allow_write).catch(() => false);
     redirect(
       res,
       '/app?m=' +
         encodeURIComponent(
           allow
-            ? cfg.allowWrite
+            ? deploymentWrite
               ? 'Writing enabled for this account.'
-              : 'Enabled for this account — but writing is off server-wide (GSC_ALLOW_WRITE), so the tools will still refuse.'
+              : 'Enabled for this account — but writing is off for this deployment, so the tools will still refuse. Only the operator can change that.'
             : 'Writing disabled for this account.',
         ),
     );

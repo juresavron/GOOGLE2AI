@@ -306,13 +306,36 @@ test('with writes off, every write tool refuses AND reaches Google with nothing'
     const { isError, text } = await c.call(name, args);
 
     assert.equal(isError, true, name);
-    // Both routes named, because whoever reads this is the one who has to act on it.
-    assert.match(text, /dashboard/, name);
+    // The single-account server: GSC_ALLOW_WRITE is the switch, and there is no dashboard.
     assert.match(text, /GSC_ALLOW_WRITE=true/, name);
     // The guard is upstream of the call, not a check on the way back.
     assert.deepEqual(gsc.wrote, [], `${name} must not reach Google`);
     await c.close();
   }
+});
+
+test('a TENANT connector is refused in terms of the switches it actually has', async () => {
+  // The two surfaces are turned on in completely different places, and the message used to name
+  // both at once. Since db/006_settings.sql a tenant cannot set GSC_ALLOW_WRITE and it would not
+  // help if they could — theirs is their own switch plus the deployment's, which only the
+  // operator can reach. Naming the env var here sends the reader somewhere that cannot help them.
+  const gsc = new MockGSC();
+  const ctx: Ctx = {
+    ...makeCtx({ defaultSite: 'sc-domain:example.com', allowWrite: false }, gsc),
+    // `mirror` is the tenant build's marker: it exists only where there is a database and an
+    // account to key it by.
+    mirror: { store: null as never, accountId: '11111111-1111-4111-8111-111111111111' },
+  };
+  const c = await connect(ctx);
+  const { isError, text } = await c.call('submit_sitemap', { feedpath: 'https://example.com/sitemap.xml' });
+
+  assert.equal(isError, true);
+  assert.match(text, /TWO switches/i);
+  assert.match(text, /dashboard/);
+  assert.match(text, /operator/);
+  assert.doesNotMatch(text, /GSC_ALLOW_WRITE/, 'a tenant cannot set it and it would not help');
+  assert.deepEqual(gsc.wrote, []);
+  await c.close();
 });
 
 test('with writes on, each write tool does exactly one thing', async () => {

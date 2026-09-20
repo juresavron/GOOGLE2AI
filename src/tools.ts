@@ -383,7 +383,15 @@ export function buildServer(ctx: Ctx): McpServer {
    */
   const guardWrite = (what: string) => {
     if (!cfg.allowWrite) {
-      throw new Error(`Writing is switched off for this connector, so ${what} did nothing. Turn it on in the dashboard, or set GSC_ALLOW_WRITE=true on a self-hosted server.`);
+      // The two surfaces are turned on in completely different places, and naming the wrong one
+      // sends the reader somewhere that cannot help. `mirror` is the discriminator the rest of
+      // this file already uses: it exists only where there is a database and an account to key it
+      // by, which is exactly the tenant build.
+      throw new Error(
+        ctx.mirror
+          ? `Writing is switched off for this connector, so ${what} did nothing. It needs TWO switches: this account's own, in the dashboard, and the deployment's, which only the operator can set.`
+          : `Writing is switched off for this connector, so ${what} did nothing. Set GSC_ALLOW_WRITE=true on the server to enable it.`,
+      );
     }
   };
 
