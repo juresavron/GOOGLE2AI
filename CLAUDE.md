@@ -92,11 +92,29 @@ Five write tools: `submit_sitemap`, `delete_sitemap`, `add_property`, `remove_pr
 `request_indexing`. That is the **entire** write surface Google exposes for Search Console — there
 is no API to request indexing of an ordinary page, remove a URL, or change a setting, at any scope.
 
-**Two switches, both required.** `GSC_ALLOW_WRITE` on the server, AND the account's own
-`allow_write` (`db/003_allow_write.sql`), AND-ed in `tenants.ts`. Both default false. One switch
-would mean enabling writes for yourself enabled them for every tenant, and the blast radius is
-somebody's property being removed from Search Console by an agent that misread a sentence. Exactly
-whatsapp2ai's `WA_ALLOW_SEND` arrangement.
+**Two switches, both required**, and **which two depends on the surface** — because the two
+surfaces are separate products:
+
+| surface | server switch | per-account switch |
+|---|---|---|
+| operator `/<MCP_SECRET>/mcp` | `GSC_ALLOW_WRITE` (env) | — it is one account |
+| tenant `/c/<token>/mcp` | `gsc_settings.allow_write`, **operator panel** | `gsc_accounts.allow_write`, tenant dashboard |
+
+All default false, AND-ed in `tenants.ts`. One switch would mean enabling writes for yourself
+enabled them for every tenant — the blast radius being somebody's property removed from Search
+Console by an agent that misread a sentence. That is whatsapp2ai's `WA_ALLOW_SEND` arrangement.
+
+The tenant server switch moved out of the environment (`db/006_settings.sql`) for a reason beyond
+convenience: **one variable governed both surfaces**. Setting `GSC_ALLOW_WRITE` to arm your own
+single-account connector also armed the tenant-side server switch — and a tenant sets their own
+`allow_write` from their dashboard, so that combination let a tenant grant themselves writes the
+operator never intended. The authority is still rooted in the environment, one level up:
+`/app/operator` is gated by `ADMIN_EMAILS`, and empty means nobody.
+
+Two properties worth keeping in `tenants.ts`: the read is **cached for `SETTINGS_TTL_MS`**, because
+it is on the hottest path in the process for a value that changes twice in a deployment's life
+(`forgetSettings()` on toggle makes it immediate for whoever flipped it); and it **fails closed**,
+because a database blip must never briefly arm every connector whose own switch is on.
 
 The tools are **registered even when writing is off**, and refuse with a message naming both routes
 to turn it on. Hiding them makes "why can't you do that" unanswerable.

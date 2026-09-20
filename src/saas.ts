@@ -540,13 +540,43 @@ export function mountSaas(app: Express, d: SaasDeps): void {
    */
   const isAdmin = (user: SessionUser): boolean => cfg.adminEmails.length > 0 && cfg.adminEmails.includes(user.email.trim().toLowerCase());
 
+  /**
+   * The deployment-wide write switch. Admin-gated the same way the panel is, and checked again
+   * HERE rather than trusted from the page that rendered the form — a POST is not a page.
+   */
+  app.post('/app/operator/write', async (req, res) => {
+    const user = await guard(req, res);
+    if (!user) return;
+    if (!isAdmin(user)) return res.status(404).type('text/plain').send('not found');
+
+    const allow = String(req.body?.allow ?? '') === '1';
+    try {
+      await db.setGlobalAllowWrite(allow, user.email);
+    } catch (e) {
+      log.error({ err: e instanceof Error ? e.stack : String(e) }, 'could not set the deployment write switch');
+      return redirect(res, '/app/operator?e=' + encodeURIComponent('Saving that failed on this server; the switch is unchanged.'));
+    }
+    // So it takes effect on the next tool call rather than up to SETTINGS_TTL_MS later.
+    tenants.forgetSettings();
+    log.warn({ by: user.email, allow }, 'deployment write switch changed');
+    redirect(
+      res,
+      '/app/operator?m=' +
+        encodeURIComponent(
+          allow
+            ? 'Writing is on for this deployment. Accounts with their own switch off still cannot write.'
+            : 'Writing is off for this deployment. No tenant connector can write, whatever its own switch says.',
+        ),
+    );
+  });
+
   app.get('/app/operator', async (req, res) => {
     const user = await guard(req, res);
     if (!user) return;
     // 404, not 403: a signed-in stranger learns nothing about whether this panel exists.
     if (!isAdmin(user)) return res.status(404).type('text/plain').send('not found');
 
-    const [totals, accounts, errors] = await Promise.all([db.totals(), db.allAccounts(), db.errorBreakdown()]);
+    const [totals, accounts, errors, settings] = await Promise.all([db.totals(), db.allAccounts(), db.errorBreakdown(), db.getSettings()]);
 
     const rows = accounts.map((a) => {
       const st = accountState(a);
@@ -568,6 +598,8 @@ export function mountSaas(app: Express, d: SaasDeps): void {
         topbar(user, true) +
           pageHeader({ title: 'Operator', meta: 'Every account on this deployment', back: { href: '/app', label: 'Dashboard' } }) +
           `<div class="stack" style="margin-top:1.25rem">` +
+          notice(typeof req.query.m === 'string' ? req.query.m : '') +
+          notice(typeof req.query.e === 'string' ? req.query.e : '', true) +
           stats(
             stat({ label: 'Accounts', value: totals.accounts }),
             stat({ label: 'Connected', value: totals.connected, state: totals.connected === totals.accounts ? 'ok' : 'pending' }),
@@ -575,6 +607,33 @@ export function mountSaas(app: Express, d: SaasDeps): void {
             stat({ label: 'Calls 24h', value: totals.calls_24h }),
             stat({ label: 'Errors 24h', value: totals.errors_24h, state: totals.errors_24h ? 'danger' : 'ok' }),
           ) +
+          panel({
+            title: 'Writing',
+            meta: 'The deployment-wide half of the two-switch gate on tenant connectors.',
+            body:
+              `<div class="stats">
+                 ${stat({ label: 'Deployment', value: settings.allow_write ? 'On' : 'Off', state: settings.allow_write ? 'pending' : 'info' })}
+                 ${stat({ label: 'Accounts with it on', value: accounts.filter((a) => a.allow_write).length })}
+                 ${stat({ label: 'Can write now', value: settings.allow_write ? accounts.filter((a) => a.allow_write).length : 0, state: settings.allow_write && accounts.some((a) => a.allow_write) ? 'pending' : 'info' })}
+               </div>` +
+              `<p class="meta">Both switches must be on. This one, and the account's own — so turning this on grants
+                 nothing by itself, and turning it off stops every tenant connector writing at once.
+                 ${settings.allow_write_by
+                   ? `Last changed by <code>${esc(settings.allow_write_by)}</code>${settings.allow_write_at ? ` on ${esc(new Date(settings.allow_write_at).toISOString().slice(0, 16).replace('T', ' '))} UTC` : ''}.`
+                   : 'Never changed.'}</p>` +
+              `<p class="micro">Does not affect the operator connector at <code>/&lt;MCP_SECRET&gt;/mcp</code>, which has no
+                 database and reads <code>GSC_ALLOW_WRITE</code> from the environment
+                 (currently <strong>${cfg.allowWrite ? 'on' : 'off'}</strong>).</p>` +
+              `<div class="acts">
+                 <form method="post" action="/app/operator/write" class="rowform"
+                       data-confirm="${settings.allow_write
+                         ? 'Stop every tenant connector on this deployment from writing?'
+                         : 'Allow writing for every account that has its own switch on? remove_property drops a property out of Search Console along with its history, and re-adding it needs ownership verification again.'}">
+                   <input type="hidden" name="allow" value="${settings.allow_write ? '0' : '1'}">
+                   <button class="${settings.allow_write ? '' : 'danger'}" type="submit">${settings.allow_write ? 'Turn writing off' : 'Turn writing on'}</button>
+                 </form>
+               </div>`,
+          }) +
           panel({
             title: 'Accounts',
             flush: true,

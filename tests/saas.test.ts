@@ -93,7 +93,7 @@ test('the sign-in page renders, and the dashboard refuses without a session', as
 });
 
 test('every mutating route requires a session', async () => {
-  for (const p of ['/app/accounts', '/app/accounts/x/property', '/app/accounts/x/tokens', '/app/accounts/x/delete']) {
+  for (const p of ['/app/accounts', '/app/accounts/x/property', '/app/accounts/x/tokens', '/app/accounts/x/delete', '/app/operator/write']) {
     const res = await fetch(`${base}${p}`, { method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'label=x' });
     assert.equal(res.status, 303, p);
     assert.equal(res.headers.get('location'), '/login', p);

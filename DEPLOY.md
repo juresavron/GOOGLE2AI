@@ -115,8 +115,8 @@ connector URLs, read **[SAAS.md](SAAS.md)** first — it covers what you are tak
 1. **A Supabase project of its own.** Not imap2ai's or whatsapp2ai's: `db/schema.sql` refuses to run
    on either, because `mcp_tokens` and `mcp_calls` exist in all three and the collision is silent.
 2. Apply, in the SQL editor and in this order: `db/schema.sql`, `db/002_mirror.sql`,
-   `db/003_allow_write.sql`, `db/004_tenant_quota_project.sql`, `db/005_all_properties.sql`. Each is
-   safe to re-run.
+   `db/003_allow_write.sql`, `db/004_tenant_quota_project.sql`, `db/005_all_properties.sql`,
+   `db/006_settings.sql`. Each is safe to re-run.
 3. Set the rest:
 
 ```bash

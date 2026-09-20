@@ -42,6 +42,13 @@ export interface Account {
   created_at: Date;
 }
 
+/** Deployment-wide operator settings. One row; see db/006_settings.sql. */
+export interface Settings {
+  allow_write: boolean;
+  allow_write_by: string | null;
+  allow_write_at: Date | null;
+}
+
 /** What the connector route needs, in one round trip: who this token is, and the sealed credential. */
 export interface Connector {
   account: Account;
@@ -200,6 +207,38 @@ export class Db {
    * refuses a spelling the API would 403 on — enforced there rather than here so it holds for every
    * route, including ones not yet written.
    */
+  /**
+   * The deployment-wide half of the tenant write gate. No userId: this is the OPERATOR's switch,
+   * and the route that reaches it is gated by ADMIN_EMAILS rather than by row ownership.
+   *
+   * Returns the row rather than a boolean so the caller can show who armed it and when without a
+   * second round trip — and so a failed update is distinguishable from one that changed nothing.
+   */
+  async getSettings(): Promise<Settings> {
+    const { rows } = await this.q.query(
+      `select allow_write, allow_write_by, allow_write_at from public.gsc_settings where id = true`,
+    );
+    // A deployment whose settings row is missing is not a deployment that may write. Defaulting
+    // to false here means a half-applied migration fails CLOSED.
+    return (rows[0] as Settings) ?? { allow_write: false, allow_write_by: null, allow_write_at: null };
+  }
+
+  /** Records who and when, because arming writes across every account is not a preference. */
+  async setGlobalAllowWrite(allow: boolean, byEmail: string): Promise<Settings> {
+    const { rows } = await this.q.query(
+      `insert into public.gsc_settings (id, allow_write, allow_write_by, allow_write_at, updated_at)
+            values (true, $1::boolean, $2::text, now(), now())
+       on conflict (id) do update
+              set allow_write = excluded.allow_write,
+                  allow_write_by = excluded.allow_write_by,
+                  allow_write_at = excluded.allow_write_at,
+                  updated_at = now()
+         returning allow_write, allow_write_by, allow_write_at`,
+      [allow, byEmail],
+    );
+    return rows[0] as Settings;
+  }
+
   async setProperty(userId: string, accountId: string, property: string | null): Promise<boolean> {
     // Null is "all properties", not "unset": the two are different facts and the column pair keeps
     // them apart. Written in ONE statement so a connector can never be observed with both a

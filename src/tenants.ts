@@ -36,6 +36,12 @@ export interface TenantsOptions {
   maxEntries?: number;
 }
 
+/**
+ * How stale the deployment-wide write switch may be on a call already in flight. Short, because
+ * the value it caches is a permission; not zero, because it is read on every tool call.
+ */
+const SETTINGS_TTL_MS = 15_000;
+
 export class Tenants {
   private readonly cfg: Config;
   private readonly db: Db;
@@ -61,6 +67,19 @@ export class Tenants {
    */
   private readonly cache = new Map<string, Entry>();
 
+  /**
+   * The deployment-wide write switch, cached briefly.
+   *
+   * Read on every tool call, so a round trip per call would put a query on the hottest path in the
+   * process for a value that changes perhaps twice in a deployment's life. The TTL is short, and
+   * the operator panel calls forgetSettings() the moment it toggles, so the delay is zero for the
+   * person who flipped it and at most SETTINGS_TTL_MS for a call already in flight.
+   *
+   * Cached as the VALUE, not the promise: a failed read must not be remembered as false for the
+   * next fifteen seconds, it must be retried.
+   */
+  private settings: { at: number; allowWrite: boolean } | null = null;
+
   constructor(cfg: Config, db: Db, oauth: GoogleOAuth, log: pino.Logger, masterKey: string, opts: TenantsOptions = {}) {
     this.cfg = cfg;
     this.db = db;
@@ -71,6 +90,28 @@ export class Tenants {
     this.ttlMs = opts.ttlMs ?? 5 * 60_000;
     this.maxEntries = opts.maxEntries ?? 500;
     this.store = new Store(db);
+  }
+
+  /** Called by the operator panel the moment it toggles, so the switch appears to take effect now. */
+  forgetSettings(): void {
+    this.settings = null;
+  }
+
+  /**
+   * Fails CLOSED. A database that cannot answer is not permission to write, and the only way to
+   * reach that branch is a real outage — in which case every tool call is failing anyway.
+   */
+  private async globalAllowWrite(): Promise<boolean> {
+    const hit = this.settings;
+    if (hit && Date.now() - hit.at < SETTINGS_TTL_MS) return hit.allowWrite;
+    try {
+      const allowWrite = (await this.db.getSettings()).allow_write;
+      this.settings = { at: Date.now(), allowWrite };
+      return allowWrite;
+    } catch (e) {
+      this.log.error({ err: String(e instanceof Error ? e.message : e) }, 'could not read the write switch; refusing writes');
+      return false;
+    }
   }
 
   /** Drop a cached client — after a revocation, a delete, or fresh consent replacing the token. */
@@ -190,18 +231,26 @@ export class Tenants {
     // nice-to-have telemetry, and the connector working is not.
     void this.db.touchToken(token_id).catch(() => undefined);
 
+    const globalWrite = await this.globalAllowWrite();
+
     const ctx: Ctx = {
-      // The account's property becomes this connector's default, so its tools can be called with no
-      // siteUrl and the instructions can name it — exactly how the siblings read as bound to one
-      // account rather than to a service.
-      // TWO SWITCHES, BOTH REQUIRED. The server's GSC_ALLOW_WRITE and the account's own. One
-      // switch would mean enabling writes for yourself enabled them for every tenant, and the
-      // blast radius is somebody's property being removed from Search Console by an agent that
-      // misread a sentence.
-      // Empty when the account is set to all properties: tools.ts then requires every call to name
-      // its own siteUrl, and the instructions say so. It was never a restriction either way — no
-      // tool filters by it — so this only decides what happens when siteUrl is OMITTED.
-      cfg: { ...this.cfg, defaultSite: account.property ?? '', allowWrite: this.cfg.allowWrite && account.allow_write },
+      // defaultSite: the account's property, so tools can be called with no siteUrl and the
+      // instructions can name it — how the siblings read as bound to one account rather than to a
+      // service. EMPTY when the account is set to all properties, which makes tools.ts require
+      // every call to name its own. Never a restriction either way: no tool filters by it, so this
+      // only decides what a call means when it does not say.
+      //
+      // allowWrite: TWO SWITCHES, BOTH REQUIRED — the deployment's, set in the operator panel, and
+      // the account's own. One switch would mean enabling writes for yourself enabled them for
+      // every tenant, and the blast radius is somebody's property being removed from Search
+      // Console by an agent that misread a sentence.
+      //
+      // NOT cfg.allowWrite. GSC_ALLOW_WRITE governs the OPERATOR connector, which has no database
+      // to read a setting from — and while one variable governed both, arming your own connector
+      // silently armed the tenant-side server switch too. A tenant controls their own allow_write
+      // from their dashboard, so that combination let a tenant grant themselves writes the
+      // operator never intended.
+      cfg: { ...this.cfg, defaultSite: account.property ?? '', allowWrite: globalWrite && account.allow_write },
       gsc,
       // The mirror is keyed by account, so it only exists on this surface. The single-account
       // server has no database and no account id, and asks Google every time.

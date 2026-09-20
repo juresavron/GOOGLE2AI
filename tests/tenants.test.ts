@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import pino from 'pino';
 import { configFromEnv } from '../src/env.ts';
-import type { Account, Connector, Db } from '../src/db.ts';
+import type { Account, Connector, Db, Settings } from '../src/db.ts';
 import { GoogleOAuth } from '../src/google-oauth.ts';
 import { generateMasterKey, seal } from '../src/secrets.ts';
 import { mintToken, Tenants, tokenHash } from '../src/tenants.ts';
@@ -35,6 +35,16 @@ class FakeDb {
   pending: { id: string; sealed: any }[] = [];
   finished: string[] = [];
   droppedSecrets: string[] = [];
+
+  /**
+   * The deployment-wide write switch. Present on the fake on purpose: without it every resolve()
+   * would take the fail-closed branch, and a suite that is green because the switch is unreadable
+   * is not testing the switch.
+   */
+  settings: Settings = { allow_write: false, allow_write_by: null, allow_write_at: null };
+  async getSettings() {
+    return this.settings;
+  }
 
   async connectorByToken(): Promise<Connector | null> {
     return this.connector;
@@ -248,4 +258,77 @@ test('an all-properties account yields a connector with no default, not a broken
   const r = await build(db).resolve('tok');
   assert.ok(isCtx(r));
   assert.equal(r.cfg.defaultSite, '', 'empty, so tools.ts requires each call to name its own siteUrl');
+});
+
+// ---------------------------------------------------------------- the write gate
+
+/** Both switches, all four combinations. Neither alone may produce a writable connector. */
+test('writing needs BOTH the deployment switch and the account switch', async () => {
+  for (const deployment of [false, true]) {
+    for (const account of [false, true]) {
+      const db = connected(new FakeDb(), { allow_write: account });
+      db.settings = { allow_write: deployment, allow_write_by: null, allow_write_at: null };
+      const r = await build(db).resolve('tok');
+      assert.ok(isCtx(r));
+      assert.equal(
+        (r.cfg as { allowWrite: boolean }).allowWrite,
+        deployment && account,
+        `deployment=${deployment} account=${account}`,
+      );
+    }
+  }
+});
+
+test('the deployment switch does NOT come from GSC_ALLOW_WRITE any more', async () => {
+  // One variable used to govern both surfaces, so arming the operator's own single-account
+  // connector armed the tenant-side server switch too — and a tenant sets their own allow_write
+  // from their dashboard, so that combination let a tenant grant themselves writes the operator
+  // never intended. build() sets cfg.allowWrite true below; the tenant must still be refused.
+  const db = connected(new FakeDb(), { allow_write: true });
+  db.settings = { allow_write: false, allow_write_by: null, allow_write_at: null };
+  const t = new Tenants(
+    { ...configFromEnv(), clientId: 'cid', clientSecret: 'csec', allowWrite: true },
+    db as unknown as Db,
+    new GoogleOAuth('cid', 'csec', 'https://x/cb'),
+    log,
+    MASTER,
+    { maxCallsPerMinute: 5, ttlMs: 60_000 },
+  );
+  const r = await t.resolve('tok');
+  assert.ok(isCtx(r));
+  assert.equal((r.cfg as { allowWrite: boolean }).allowWrite, false, 'the environment must not arm a tenant');
+});
+
+test('a write switch that cannot be read is not permission to write', async () => {
+  // Fails CLOSED. The alternative is a database blip briefly arming every connector that has its
+  // own switch on, which is the one direction this must never fail in.
+  const db = connected(new FakeDb(), { allow_write: true });
+  db.getSettings = async () => {
+    throw new Error('connection terminated unexpectedly');
+  };
+  const r = await build(db).resolve('tok');
+  assert.ok(isCtx(r), 'and the connector still WORKS — reads are unaffected');
+  assert.equal((r.cfg as { allowWrite: boolean }).allowWrite, false);
+});
+
+test('the switch is cached, and forgetSettings makes a change visible at once', async () => {
+  const db = connected(new FakeDb(), { allow_write: true });
+  const t = build(db);
+
+  let reads = 0;
+  const base = db.getSettings.bind(db);
+  db.getSettings = async () => {
+    reads++;
+    return base();
+  };
+
+  await t.resolve('tok');
+  await t.resolve('tok');
+  assert.equal(reads, 1, 'not a query on every tool call');
+
+  db.settings = { allow_write: true, allow_write_by: 'op@example.com', allow_write_at: new Date() };
+  assert.equal(((await t.resolve('tok')) as { cfg: { allowWrite: boolean } }).cfg.allowWrite, false, 'still cached');
+
+  t.forgetSettings();
+  assert.equal(((await t.resolve('tok')) as { cfg: { allowWrite: boolean } }).cfg.allowWrite, true, 'and now it is not');
 });

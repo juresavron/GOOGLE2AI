@@ -61,6 +61,8 @@ const CALLS = {
   // The one that shipped broken, in both of its shapes.
   setProperty: [UUID, UUID, 'sc-domain:example.com'],
   setStatus: [UUID, 'connected', { error: null, googleEmail: null }],
+  getSettings: [],
+  setGlobalAllowWrite: [true, 'operator@example.com'],
   setSecret: [UUID, SEALED],
   getSecret: [UUID],
   dropSecret: [UUID],
