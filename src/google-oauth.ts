@@ -24,13 +24,21 @@ import crypto from 'node:crypto';
  * to show: list_sites simply comes back empty, which reads as "I have no properties". Both are
  * non-sensitive scopes and neither widens what the token can do to Search Console.
  */
+/**
+ * The one scope without which this product does nothing. Named separately because it is checked
+ * again on the way back: Google's consent screen has a CHECKBOX PER SCOPE, and unticking this one
+ * still produces a completed consent and a working token — just not one that can see Search
+ * Console. A literal repeated in two places would eventually drift.
+ */
+export const SEARCH_CONSOLE_SCOPE = 'https://www.googleapis.com/auth/webmasters';
+
 export const SCOPES = [
   // The FULL Search Console scope, not webmasters.readonly. It is a superset, and a scope is
   // granted at consent time — widening it later means every tenant consents again, so the write
   // tools would otherwise be unreachable for everyone who connected before they existed.
   // Whether a write actually happens is decided by GSC_ALLOW_WRITE and the account's own switch,
   // not by what the token could theoretically do.
-  'https://www.googleapis.com/auth/webmasters',
+  SEARCH_CONSOLE_SCOPE,
   // A SEPARATE API with its own quota and its own enable step in the Cloud console. Google
   // restricts it to JobPosting and BroadcastEvent structured data; request_indexing says so and
   // passes Google's refusal straight through rather than pretending otherwise.
@@ -205,6 +213,26 @@ export class GoogleOAuth {
       // account with no refresh token produces a connector that works until the access token
       // expires an hour later and then fails forever.
       throw new OAuthError('no_refresh_token', 'Google returned no refresh token. Revoke this app at myaccount.google.com/permissions and connect again.');
+    }
+
+    // Google returns exactly which scopes it granted, and its consent screen offers a CHECKBOX PER
+    // SCOPE — so somebody can untick Search Console, complete the consent, and come back holding a
+    // valid token that cannot read a single property. Checked HERE because this is the one moment
+    // the remedy is one click away. Discovered later it surfaces as "no properties are visible",
+    // which reads as "you consented as the wrong Google account" and sends the reader off to audit
+    // an account that was right all along.
+    //
+    // Only enforced when Google actually said something; an absent `scope` is not evidence of a
+    // refusal, and failing closed on it would break every consent if that field ever went away.
+    const granted = String(body.scope ?? '').split(/\s+/).filter(Boolean);
+    if (granted.length && !granted.includes(SEARCH_CONSOLE_SCOPE)) {
+      // The grant is being thrown away, so do not leave it live in the user's Google account.
+      // Best-effort: failing to revoke must not replace the message they need to read.
+      await this.revoke(String(body.refresh_token)).catch(() => {});
+      throw new OAuthError(
+        'scope_declined',
+        'Google did not grant Search Console access. On the consent screen, the "View and manage Search Console data for your verified sites" permission was left unticked — Google shows one checkbox per permission and ticking the top one does not tick the rest. Connect again and make sure every box is ticked.',
+      );
     }
 
     const accessToken = String(body.access_token ?? '');

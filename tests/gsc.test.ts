@@ -11,6 +11,17 @@ test('cleanError names the two 403s apart, because their remedies are different'
   const noAccess = cleanError({ response: { status: 403, data: { error: { message: 'User does not have sufficient permission for site.' } } } });
   assert.match(noAccess, /Users and permissions/, 'points at the Search Console screen that fixes it');
   assert.doesNotMatch(noAccess, /GOOGLE_QUOTA_PROJECT/, 'does not send someone to the wrong fix');
+
+  // Three, now. A token that was never GRANTED the Search Console scope gets the same 403 as one
+  // whose account lacks ACCESS, and the remedies share nothing: reconnect and tick a box, versus
+  // be added to the property. Owning the property does not help the first one at all, so sending
+  // someone to Users and permissions is an afternoon spent on a screen that is already correct.
+  const noScope = cleanError({
+    response: { status: 403, data: { error: { message: 'Request had insufficient authentication scopes.', status: 'PERMISSION_DENIED' } } },
+  });
+  assert.match(noScope, /consent screen/, 'points at where a scope is actually granted');
+  assert.doesNotMatch(noScope, /Users and permissions/, 'and not at the screen that cannot fix it');
+  assert.doesNotMatch(noScope, /GOOGLE_QUOTA_PROJECT/);
 });
 
 test('cleanError explains a 401 as a revoked token rather than a wrong password', () => {

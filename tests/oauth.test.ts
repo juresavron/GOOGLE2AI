@@ -230,3 +230,56 @@ test('an unconfigured server says so rather than building a broken URL', () => {
   assert.equal(o.configured, false);
   assert.throws(() => o.begin(ACCOUNT), /not configured/);
 });
+
+test('a consent that leaves Search Console unticked is refused, not stored', async () => {
+  // Google's consent screen shows ONE CHECKBOX PER SCOPE. Untick the Search Console one and the
+  // consent still completes, still returns a refresh token, and still tells you which account
+  // signed in — it just cannot see a single property. That arrived on the dashboard as "no
+  // properties are visible", which reads as "wrong Google account" and is the wrong thing to go
+  // and check.
+  const g = new FakeGoogle();
+  g.reply({ ...GOOD_TOKEN, scope: 'https://www.googleapis.com/auth/indexing openid email' });
+  const o = make(g);
+  const { cookie } = o.begin(ACCOUNT);
+
+  await assert.rejects(
+    () => o.complete({ code: 'c', state: cookie.slice(0, cookie.lastIndexOf(':')), cookie }),
+    (e: unknown) => {
+      assert.ok(e instanceof OAuthError);
+      assert.equal((e as OAuthError).code, 'scope_declined');
+      assert.match((e as Error).message, /View and manage Search Console data/, 'quotes the checkbox, so it can be found');
+      return true;
+    },
+  );
+
+  // The grant is being thrown away, so it must not be left live in the user's Google account.
+  const revoked = g.sent.find((x) => x.url.includes('/revoke'));
+  assert.ok(revoked, 'the discarded refresh token is revoked');
+  assert.equal(revoked?.body.get('token'), GOOD_TOKEN.refresh_token);
+});
+
+test('a token response with no scope field completes, rather than failing closed', async () => {
+  // An absent `scope` is not evidence of a refusal. Failing closed on it would break every consent
+  // if Google ever stopped sending the field, which is a worse failure than the one being guarded.
+  const g = new FakeGoogle();
+  const { scope: _dropped, ...noScope } = GOOD_TOKEN;
+  g.reply(noScope).reply({ email: 'someone@example.com' });
+  const o = make(g);
+  const { cookie } = o.begin(ACCOUNT);
+
+  const { grant } = await o.complete({ code: 'c', state: cookie.slice(0, cookie.lastIndexOf(':')), cookie });
+  assert.equal(grant.refreshToken, GOOD_TOKEN.refresh_token);
+  assert.ok(!g.sent.some((x) => x.url.includes('/revoke')), 'and nothing was revoked on a guess');
+});
+
+test('a consent granting Search Console but not indexing is still accepted', async () => {
+  // Only the Search Console scope is load-bearing. request_indexing failing is a tool returning
+  // Google's refusal; no Search Console scope is a connector that can do nothing at all.
+  const g = new FakeGoogle();
+  g.reply({ ...GOOD_TOKEN, scope: 'https://www.googleapis.com/auth/webmasters openid email' }).reply({ email: 'someone@example.com' });
+  const o = make(g);
+  const { cookie } = o.begin(ACCOUNT);
+
+  const { grant } = await o.complete({ code: 'c', state: cookie.slice(0, cookie.lastIndexOf(':')), cookie });
+  assert.equal(grant.email, 'someone@example.com');
+});

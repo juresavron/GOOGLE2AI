@@ -113,6 +113,12 @@ export function cleanError(e: unknown): string {
   if (status === 403 && /quota project/i.test(inner)) {
     return 'Google refused the call because no quota project is attached to these credentials. Set GOOGLE_QUOTA_PROJECT to a project id with the Search Console API enabled.';
   }
+  // A 403 for a missing SCOPE and a 403 for missing ACCESS look alike and have nothing in common
+  // as remedies: one is fixed by reconnecting and ticking a box, the other by being added to the
+  // property in Search Console. Sending someone to the wrong one costs an afternoon.
+  if (status === 403 && /insufficient authentication scopes|ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(inner)) {
+    return `Google refused the call because this token carries no Search Console permission (403). That is granted on the consent screen, which has one checkbox per permission — reconnect the account and tick every box. Being an owner of the property does not help until the token has the scope. (${inner})`;
+  }
   if (status === 403) {
     return `Google refused the call (403). These credentials can reach the API but not this property — check that the account was added in Search Console → Settings → Users and permissions. (${inner})`;
   }

@@ -14,11 +14,21 @@ import { Attempts, Auth, clearSession, COOKIE, OneShot, readCookie, setSession, 
 import type { Account, Db } from './db.ts';
 import { clearConsentCookie, consentCookie, CONSENT_COOKIE, GoogleOAuth, OAuthError, readCookie as readRawCookie } from './google-oauth.ts';
 import type { Config } from './env.ts';
+import { cleanError } from './gsc.ts';
 import { banner, chip, emptyState, esc, page, pageHeader, panel, stat, stats, table, type State } from './html.ts';
 import { mountMcp } from './mcp.ts';
 import { mountPages } from './pages.ts';
 import { CryptoError, seal } from './secrets.ts';
 import { mintToken, Tenants, tokenHash } from './tenants.ts';
+
+/** Whether asking Google was even possible is as much a part of the answer as the list itself. */
+interface SitesResult {
+  sites: string[];
+  error: string | null;
+}
+
+/** The "we did not ask" case: not an empty list, and not a failure either. */
+const NO_SITES: SitesResult = { sites: [], error: null };
 
 export interface SaasDeps {
   cfg: Config;
@@ -258,7 +268,7 @@ export function mountSaas(app: Express, d: SaasDeps): void {
           await Promise.all(
             accounts.map(async (a) => {
               const tokens = (await db.listTokens(user.id, a.id)).filter((t) => !t.revoked_at);
-              const sites = a.status === 'connected' && !a.property ? await sitesFor(a).catch(() => []) : [];
+              const sites = a.status === 'connected' && !a.property ? await sitesFor(a) : NO_SITES;
               const st = accountState(a);
               const id = encodeURIComponent(a.id);
 
@@ -274,15 +284,26 @@ export function mountSaas(app: Express, d: SaasDeps): void {
               }
 
               if (a.status === 'connected' && !a.property) {
+                // Three states, not two. An empty list and a FAILED CALL used to render the same
+                // sentence — "no properties are visible, you probably used the wrong Google
+                // account" — which is a guess presented as a diagnosis, and when the call was
+                // actually refused for a missing scope it is the wrong guess: it sends the reader
+                // to audit an account that was correct all along. Same mistake the mirror is built
+                // to avoid, where a day with zero impressions and a day never synced are different
+                // facts that must not share a representation.
+                const reconnect = `<div class="acts"><a class="btn" href="/oauth/google/start?account=${id}">Reconnect Google</a></div>`;
                 body.push(
-                  sites.length
+                  sites.sites.length
                     ? `<form method="post" action="/app/accounts/${id}/property">
                          <label for="p-${id}">Which property?</label>
-                         <select id="p-${id}" name="property">${sites.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('')}</select>
+                         <select id="p-${id}" name="property">${sites.sites.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('')}</select>
                          <div class="acts" style="margin-top:.625rem"><button class="primary" type="submit">Use this one</button></div>
                        </form>`
-                    : `<p class="meta">No properties are visible to ${esc(a.google_email ?? 'this account')}. That usually means
-                         consent was given as a different Google account than the one that owns the property.</p>`,
+                    : sites.error
+                      ? `<p class="meta">Google would not list this account's properties. ${esc(sites.error)}</p>${reconnect}`
+                      : `<p class="meta">Google returned no properties for ${esc(a.google_email ?? 'this account')}. The call
+                           succeeded and the list was genuinely empty, so this account owns none — which usually means consent
+                           was given as a different Google account than the one that owns the property.</p>${reconnect}`,
                 );
               }
 
@@ -365,10 +386,27 @@ export function mountSaas(app: Express, d: SaasDeps): void {
      * it is the list the user is about to choose from, and a stale one would offer a property the
      * credential cannot read — which fails later as a 403 that reads like a permissions problem.
      */
-    async function sitesFor(a: Account): Promise<string[]> {
+    /**
+     * The properties this account can see, AND whether asking even worked.
+     *
+     * Returning a bare array meant the caller had nowhere to put a failure and wrote
+     * `.catch(() => [])`, so every 403, every expired token and every unreachable database
+     * arrived on screen as "you have no properties". The error is the more useful half: it is the
+     * half that says what to do.
+     */
+    async function sitesFor(a: Account): Promise<SitesResult> {
       const client = await tenants.clientFor(a);
-      if (!client) return [];
-      return (await client.listSites()).map((x) => x.siteUrl);
+      if (!client) {
+        return { sites: [], error: 'This server could not unseal this account\u2019s stored credential, which usually means MASTER_KEY changed since it was connected. Reconnecting fixes it.' };
+      }
+      try {
+        return { sites: (await client.listSites()).map((x) => x.siteUrl), error: null };
+      } catch (e) {
+        // In full to the log, cleaned for the screen. cleanError separates the 403 for a missing
+        // scope from the 403 for missing access, because their remedies have nothing in common.
+        log.error({ account: a.id, err: e instanceof Error ? e.stack : String(e) }, 'listing a tenant\u2019s properties failed');
+        return { sites: [], error: cleanError(e) };
+      }
     }
   });
 
