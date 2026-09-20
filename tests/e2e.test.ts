@@ -100,7 +100,14 @@ test('security headers are on every response', async () => {
     assert.equal(res.headers.get('x-content-type-options'), 'nosniff', p);
     assert.equal(res.headers.get('x-frame-options'), 'DENY', p);
     assert.equal(res.headers.get('referrer-policy'), 'no-referrer', p);
-    assert.match(String(res.headers.get('content-security-policy')), /default-src 'none'/, p);
+    const csp = String(res.headers.get('content-security-policy'));
+    assert.match(csp, /default-src 'none'/, p);
+    // Chrome checks form-action against every redirect hop, and the consent flow's last hop is
+    // Google's. Without this the "Continue to Google" button does nothing at all — no error, no
+    // navigation, just a dead button.
+    assert.match(csp, /form-action 'self' https:\/\/accounts\.google\.com/, p);
+    // And nothing wider: 'self' plus exactly one host, not a wildcard.
+    assert.doesNotMatch(csp, /form-action[^;]*\*/, p);
   }
 });
 

@@ -490,9 +490,20 @@ export const SECURITY_HEADERS: Record<string, string> = {
   // `style-src` keeps 'unsafe-inline' deliberately. The markup uses style="" attributes throughout,
   // which that directive also governs; CSS is not execution, and `default-src 'none'` with
   // `img-src 'self' data:` already blocks the exfiltration routes a stylesheet could otherwise take.
+  // form-action lists accounts.google.com as well as 'self', and it has to.
+  //
+  // CHROME APPLIES form-action TO EVERY HOP OF A REDIRECT CHAIN, not just the URL in the form's
+  // action attribute. "Add a property" posts to /app/accounts, which redirects to
+  // /oauth/google/start, which redirects to Google's consent screen — and that last hop is not
+  // 'self', so Chrome refused the whole submission. The symptom is the worst kind: the button does
+  // NOTHING, no error, no navigation, and the only evidence is a line in the Issues panel.
+  // (Firefox submits it; the two browsers read the spec differently.)
+  //
+  // Widened to exactly one host rather than dropped: accounts.google.com is the only cross-origin
+  // place any form here may end up, and 'self' still covers everything else.
   'Content-Security-Policy':
     "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'self'; " +
-    "form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "form-action 'self' https://accounts.google.com; base-uri 'none'; frame-ancestors 'none'",
 };
 
 /**
