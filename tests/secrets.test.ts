@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
+import crypto from 'node:crypto';
 import { checkMasterKey, CryptoError, generateMasterKey, open, seal, VERSION } from '../src/secrets.ts';
 
 const MASTER = generateMasterKey();
@@ -65,7 +66,10 @@ test('a short or missing master key is refused before anything is stored', () =>
   try {
     seal('', ACCOUNT, TOKEN);
   } catch (e) {
-    assert.match(String((e as Error).message), /randomBytes\(32\)/);
+    assert.match(String((e as Error).message), /openssl rand -base64 32/);
+    // Both paths refuse a key for the same reason, so they must offer the same remedy: two
+    // different commands for one condition is how somebody decides they are two problems.
+    assert.equal(String((e as Error).message).includes('openssl rand -base64 32'), String(checkMasterKey('dG9vLXNob3J0')).includes('openssl rand -base64 32'));
   }
 });
 
@@ -96,7 +100,61 @@ test('checkMasterKey catches a key that is present but the wrong shape', () => {
     assert.ok(problem, `"${bad}" must be rejected`);
     assert.match(problem, /must be exactly 32/);
     assert.match(problem, /43 characters/, 'says what a correct one looks like');
-    assert.match(problem, /randomBytes\(32\)/, 'and how to make one');
+    assert.match(problem, /openssl rand -base64 32/, 'and how to make one');
+  }
+});
+
+test('a key generated as hex is read as hex, not misread as 48 bytes', () => {
+  // The one that reached production. `openssl rand -hex 32` is the most common way to make 32
+  // random bytes, and every hex character is ALSO a valid base64url character — so its output does
+  // not fail to decode, it silently decodes to 48 bytes of something else and the server refuses
+  // to boot on 256 perfectly good bits.
+  const hex = crypto.randomBytes(32).toString('hex');
+  assert.equal(hex.length, 64);
+  assert.equal(Buffer.from(hex, 'base64url').length, 48, 'the trap this guards against still exists');
+
+  assert.equal(checkMasterKey(hex), null);
+  assert.equal(open(hex, ACCOUNT, seal(hex, ACCOUNT, TOKEN)), TOKEN);
+  // Case and stray whitespace are how it arrives from a terminal or a paste, not a different key.
+  assert.equal(checkMasterKey(hex.toUpperCase()), null);
+  assert.equal(checkMasterKey(`\n${hex}\n`), null);
+  assert.equal(open(`\n${hex}\n`, ACCOUNT, seal(hex, ACCOUNT, TOKEN)), TOKEN, 'and it is the SAME key either way');
+});
+
+test('48 bytes is still refused, and the message names the near miss', () => {
+  // `openssl rand -base64 48` — the other way to arrive at 48, and the one hex support must not
+  // start silently accepting.
+  const tooBig = crypto.randomBytes(48).toString('base64url');
+  const problem = String(checkMasterKey(tooBig));
+  assert.match(problem, /decodes to 48 bytes/);
+  assert.match(problem, /asked for 48 instead of 32/, 'points at the command, not the docs');
+  assert.throws(() => seal(tooBig, ACCOUNT, TOKEN), CryptoError);
+});
+
+test('the boot check and the seal path never disagree about a key', () => {
+  // Two decoders would produce the worst failure available here: a server that boots reporting a
+  // good key and then cannot read a single credential. Asserted as an equivalence over every shape
+  // that has actually turned up, rather than trusting that both call the same helper.
+  const candidates = [
+    generateMasterKey(),
+    crypto.randomBytes(32).toString('hex'),
+    crypto.randomBytes(32).toString('base64'), // openssl rand -base64 32: padded, other alphabet
+    `  ${generateMasterKey()}\n`,
+    crypto.randomBytes(48).toString('base64url'),
+    crypto.randomBytes(32).toString('hex').slice(0, 63),
+    crypto.randomBytes(16).toString('hex'),
+    'correct horse battery staple',
+    '',
+  ];
+  for (const k of candidates) {
+    const accepted = checkMasterKey(k) === null;
+    let seals = true;
+    try {
+      open(k, ACCOUNT, seal(k, ACCOUNT, TOKEN));
+    } catch {
+      seals = false;
+    }
+    assert.equal(accepted, seals, `boot check and seal disagree about a ${k.length}-character key`);
   }
 });
 

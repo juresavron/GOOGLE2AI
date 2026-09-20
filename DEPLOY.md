@@ -118,8 +118,15 @@ connector URLs, read **[SAAS.md](SAAS.md)** first — it covers what you are tak
 3. Set the rest:
 
 ```bash
-fly secrets set   SUPABASE_URL="https://<ref>.supabase.co"   SUPABASE_ANON_KEY="sb_publishable_..."   DATABASE_URL="postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres"   MASTER_KEY="$(node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))")"   PUBLIC_ORIGIN="https://google2ai.fly.dev"   OPERATOR_NAME="..." OPERATOR_CONTACT="..." OPERATOR_LAW="..."   ADMIN_EMAILS="you@example.com" -a google2ai
+fly secrets set   SUPABASE_URL="https://<ref>.supabase.co"   SUPABASE_ANON_KEY="sb_publishable_..."   DATABASE_URL="postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres"   MASTER_KEY="$(openssl rand -base64 32)"   PUBLIC_ORIGIN="https://google2ai.fly.dev"   OPERATOR_NAME="..." OPERATOR_CONTACT="..." OPERATOR_LAW="..."   ADMIN_EMAILS="you@example.com" -a google2ai
 ```
+
+**`MASTER_KEY` must be 32 bytes**, given either as base64url/base64 (43-44 characters) or as hex
+(64 characters). Both are read correctly; anything else is refused at boot with a message naming
+the byte count it got. The trap worth knowing is `openssl rand -hex 32` — right number of bytes,
+but every hex character is also a valid base64 character, so before hex was recognised its output
+decoded to 48 bytes and the server would not start on a perfectly good key. `-base64 48` and
+`-hex 48` really are wrong and are still refused.
 
 **`DATABASE_URL` must be the Session pooler string**, not `db.<ref>.supabase.co`. The direct host
 publishes only an AAAA record and Fly has no public IPv6 egress, so it is unreachable there and

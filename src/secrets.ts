@@ -46,12 +46,40 @@ const unb64 = (s: string) => Buffer.from(s, 'base64url');
 /** A new master key. Store as the MASTER_KEY secret. */
 export const generateMasterKey = (): string => b64(crypto.randomBytes(KEY_BYTES));
 
+const HEX_KEY = new RegExp(`^[0-9a-fA-F]{${KEY_BYTES * 2}}$`);
+
+/**
+ * The ONE place a MASTER_KEY string becomes bytes. Both the boot check and every seal/open go
+ * through it, because two decoders that disagree would produce the worst failure available here: a
+ * server that boots reporting a good key and then cannot read a single credential.
+ *
+ * Two encodings are accepted, and the hex one is not politeness:
+ * `openssl rand -hex 32` is the most common way anybody generates 32 random bytes, and every hex
+ * character is ALSO a valid base64url character — so its output does not fail to decode, it
+ * silently decodes to 48 bytes of something else. A 64-character all-hex string has exactly one
+ * reading that yields a usable key, so read it that way rather than refusing 256 perfectly good
+ * bits over an encoding detail.
+ *
+ * Trimming happens here rather than in the callers for the same single-decoder reason: a key with
+ * a trailing newline is still hex to the regex only if both sides trim identically.
+ */
+function decodeMasterKey(raw: string): Buffer {
+  const s = (raw ?? '').trim();
+  if (HEX_KEY.test(s)) return Buffer.from(s, 'hex');
+  // Base64url decoding is lenient — it drops characters it does not recognise rather than
+  // failing — so a key with stray characters decodes SHORT instead of raising, and the callers'
+  // length check is what actually catches it.
+  return unb64(s);
+}
+
 function masterKey(raw: string): Buffer {
-  const key = unb64(raw || '');
+  const key = decodeMasterKey(raw);
   // Checked here rather than at the first decrypt: a short key is a configuration mistake, and
   // finding out about it when a customer's connector stops working is too late.
   if (key.length !== KEY_BYTES) {
-    throw new CryptoError(`MASTER_KEY must be ${KEY_BYTES} base64url-encoded bytes. Generate one with: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`);
+    // Same wording as checkMasterKey's, deliberately: two different remedies for one condition is
+    // how somebody ends up believing they are two different problems.
+    throw new CryptoError(`MASTER_KEY must decode to ${KEY_BYTES} bytes, as base64url (43 characters) or hex (64 characters). Generate one with: openssl rand -base64 32`);
   }
   return key;
 }
@@ -86,12 +114,17 @@ const open1 = (key: Buffer, nonce: Buffer, body: Buffer, aad?: Buffer) => {
 export function checkMasterKey(raw: string): string | null {
   const s = (raw ?? '').trim();
   if (!s) return 'MASTER_KEY is not set.';
-  // Base64url decoding is lenient — it drops characters it does not recognise rather than
-  // failing — so a key with stray characters decodes to a SHORTER buffer instead of an error, and
-  // the length check below is what actually catches it.
-  const key = unb64(s);
+  const key = decodeMasterKey(s);
   if (key.length !== KEY_BYTES) {
-    return `MASTER_KEY decodes to ${key.length} bytes and must be exactly ${KEY_BYTES}. It should be ${KEY_BYTES} random bytes in base64url, which is 43 characters with no padding. Generate one with: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`;
+    // Name the near miss. "Wrong length" sends someone to re-read the docs; "you asked for 48"
+    // sends them to the command they actually typed.
+    const near =
+      key.length === KEY_BYTES + 16
+        ? ' A 48-byte value usually means the generator was asked for 48 instead of 32.'
+        : key.length < KEY_BYTES
+          ? ' A short value usually means the secret was truncated on paste.'
+          : '';
+    return `MASTER_KEY decodes to ${key.length} bytes and must be exactly ${KEY_BYTES}.${near} Either form is accepted: ${KEY_BYTES} random bytes as base64url (43 characters) or as hex (64 characters). Generate one with: openssl rand -base64 32`;
   }
   // Prove it round-trips rather than trusting the length. Cheap, and it is the actual property
   // every consent depends on.

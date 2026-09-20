@@ -42,7 +42,9 @@ const waitForHealth = async (url: string, tries = 80): Promise<void> => {
 };
 
 before(async () => {
-  const port = 19000 + (process.pid % 2000);
+  // Kept clear of 19997-19999, which the three spawn-a-server tests below bind by fixed number.
+  // A range of 2000 overlapped them, so one run in ~700 would have raced itself.
+  const port = 19000 + (process.pid % 900);
   base = `http://127.0.0.1:${port}`;
   child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'src/index.ts'], {
     cwd: ROOT,
@@ -231,5 +233,27 @@ test('the tenant build also refuses to start with a MALFORMED MASTER_KEY', async
   const code = await new Promise<number>((resolve) => proc.on('exit', (c) => resolve(c ?? -1)));
   assert.equal(code, 1, 'a wrong-shaped key must fail at BOOT, not at the first consent');
   assert.match(out, /must be exactly 32/);
-  assert.match(out, /randomBytes\(32\)/, 'and say how to make one');
+  assert.match(out, /openssl rand -base64 32/, "and say how to make one");
+});
+
+test('a MASTER_KEY generated as hex boots, rather than being misread as 48 bytes', async () => {
+  // `openssl rand -hex 32` is how most people make 32 random bytes, and every hex character is also
+  // a valid base64url character — so before this was handled, its output decoded to 48 bytes and
+  // the server refused to start on a perfectly good key. Asserted by starting the REAL server,
+  // because the failure this guards against was boot-time and cross-file.
+  const port = 19997;
+  const hex = '9f'.repeat(32);
+  const proc = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'src/index.ts'], {
+    cwd: ROOT,
+    env: { ...process.env, ...SAAS_ENV, MASTER_KEY: hex, PORT: String(port), LOG_LEVEL: 'silent' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    await waitForHealth(`http://127.0.0.1:${port}/healthz`);
+    // Not merely listening: the tenant surface came up, which is the half a bad key takes down.
+    const s = (await (await fetch(`http://127.0.0.1:${port}/status`)).json()) as Record<string, unknown>;
+    assert.equal(s.multi_tenant, 'database-unavailable', 'the key was accepted; only Postgres is missing');
+  } finally {
+    proc.kill('SIGTERM');
+  }
 });
