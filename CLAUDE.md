@@ -118,9 +118,24 @@ bypasses RLS, so those joins are the real enforcement for everything in this fil
    password and a Search Console tenant cannot), the tenant resolver (`tenants.ts`), Supabase
    sign-in (`auth.ts`), the dashboard, landing and legal pages (`saas.ts`, `pages.ts`), the
    `ADMIN_EMAILS` operator panel, and `/c/<token>/mcp`.
-5. ⬜ Stripe subscriptions — the one thing both siblings have that this does not. Deliberately not
-   guessed at: it needs real prices and product ids, which are a business decision rather than a
-   port. `db/schema.sql` has no `subscriptions` table yet for the same reason.
+## No billing, by decision
+
+Both siblings carry Stripe — imap2ai has `billing.py`, `plans.py` and a Stripe catalogue,
+whatsapp2ai has `db/002_subscriptions.sql`. **GOOGLE2AI deliberately does not**, and this is a
+settled decision rather than an unfinished stage. Do not port theirs across on the assumption that
+parity means all of it.
+
+What that means concretely, so nobody adds half of it back by accident:
+
+- No `subscriptions` or `stripe_events` table, no webhook endpoint, no plan gating anywhere.
+- `MAX_ACCOUNTS_PER_USER` is a **capacity ceiling, not a plan tier** — every account is a live
+  Google grant this deployment is responsible for, and the limit exists so one user cannot take the
+  shared API quota down by accident. It is not a lever to sell against.
+- `gsc_accounts.quota_project` is about who pays **Google Cloud** for API quota. It is the only
+  thing in this repository the word "billing" refers to.
+- Access is controlled by sign-in and by connector tokens, both revocable. There is no paid state
+  for anything to check, so there is no path where a lapsed payment can silently disable a
+  connector — which is one fewer failure mode than either sibling has.
 
 **Never run live:** sign-in and the Google consent have no end-to-end coverage, because CI has
 neither a Postgres nor an OAuth client. `tests/saas.test.ts` proves the surface mounts and degrades

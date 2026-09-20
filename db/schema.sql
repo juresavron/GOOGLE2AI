@@ -216,7 +216,8 @@ revoke select on public.gsc_account_secrets from authenticated, anon;
 -- ---------------------------------------------------------------- safe status view
 
 -- What the dashboard renders. Excludes last_error, which is operator-facing and can quote the
--- property, and excludes quota_project, which is the operator's billing arrangement.
+-- property, and excludes quota_project, which is the operator's Google Cloud billing arrangement.
+-- (The only thing "billing" means here: this product has no subscriptions of its own. See CLAUDE.md.)
 drop view if exists public.gsc_account_status;
 create view public.gsc_account_status
   with (security_invoker = true) as
