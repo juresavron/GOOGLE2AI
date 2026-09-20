@@ -269,7 +269,12 @@ export function mountSaas(app: Express, d: SaasDeps): void {
           await Promise.all(
             accounts.map(async (a) => {
               const tokens = (await db.listTokens(user.id, a.id)).filter((t) => !t.revoked_at);
-              const sites = a.status === 'connected' && !a.property ? await sitesFor(a) : NO_SITES;
+              // Fetched for every connected account, not only unchosen ones: the choice has to be
+              // CHANGEABLE. Picking one and then wanting all of them otherwise meant deleting the
+              // connection and consenting again. At most MAX_ACCOUNTS calls, in parallel, and a
+              // failure here is worth showing on a configured account too — it means that
+              // connector is broken as well, which silence would hide.
+              const sites = a.status === 'connected' ? await sitesFor(a) : NO_SITES;
               const st = accountState(a);
               const id = encodeURIComponent(a.id);
 
@@ -284,7 +289,7 @@ export function mountSaas(app: Express, d: SaasDeps): void {
                 );
               }
 
-              if (a.status === 'connected' && !a.property) {
+              if (a.status === 'connected') {
                 // Three states, not two. An empty list and a FAILED CALL used to render the same
                 // sentence — "no properties are visible, you probably used the wrong Google
                 // account" — which is a guess presented as a diagnosis, and when the call was
@@ -298,16 +303,16 @@ export function mountSaas(app: Express, d: SaasDeps): void {
                     ? `<form method="post" action="/app/accounts/${id}/property">
                          <label for="p-${id}">Which property?</label>
                          <select id="p-${id}" name="property">
-                           <option value="">All ${sites.sites.length} properties — no default</option>
-                           ${sites.sites.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('')}
+                           <option value=""${a.property ? '' : ' selected'}>All ${sites.sites.length} properties — no default</option>
+                           ${sites.sites.map((x) => `<option value="${esc(x)}"${x === a.property ? ' selected' : ''}>${esc(x)}</option>`).join('')}
                          </select>
                          <p class="micro">One connector reaches every property this Google account can see, either way. Naming
                            one only sets what a tool call means when it does not say — pick "all" and Claude names the property
                            on each question instead.</p>
-                         <div class="acts" style="margin-top:.625rem"><button class="primary" type="submit">Use this one</button></div>
+                         <div class="acts" style="margin-top:.625rem"><button class="${a.property || a.all_properties ? '' : 'primary'}" type="submit">${a.property || a.all_properties ? 'Change' : 'Use this one'}</button></div>
                        </form>`
                     : sites.error
-                      ? `<p class="meta">Google would not list this account's properties. ${esc(sites.error)}</p>${reconnect}`
+                      ? `<p class="meta">Google would not list this account’s properties${a.property ? `, so the one below cannot be changed from here` : ''}. ${esc(sites.error)}</p>${reconnect}`
                       : `<p class="meta">Google returned no properties for ${esc(a.google_email ?? 'this account')}. The call
                            succeeded and the list was genuinely empty, so this account owns none — which usually means consent
                            was given as a different Google account than the one that owns the property.</p>${reconnect}`,
