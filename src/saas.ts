@@ -62,6 +62,20 @@ export function mountSaas(app: Express, d: SaasDeps): void {
   const attempts = new Attempts();
   const oneShot = new OneShot();
 
+  /**
+   * An account id from a URL, or null.
+   *
+   * Postgres throws `invalid input syntax for type uuid` on anything that is not one, and these
+   * ids arrive from :id path segments and ?account query strings — so without this, /app/accounts/x
+   * is a 500 rather than "no such account". A 500 is both a worse answer and a louder one: it says
+   * the id reached the database, which a caller probing for valid ids can use.
+   */
+  const accountId = (v: unknown): string | null => {
+    const s = String(v ?? '');
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s) ? s : null;
+  };
+  const noSuchAccount = (res: Response) => redirect(res, '/app?e=' + encodeURIComponent('No such account.'));
+
   const secure = (req: Request) => req.protocol === 'https' || req.get('x-forwarded-proto') === 'https';
   const redirect = (res: Response, to: string) => res.redirect(303, to);
 
@@ -284,22 +298,26 @@ export function mountSaas(app: Express, d: SaasDeps): void {
   app.post('/app/accounts/:id/property', async (req, res) => {
     const user = await guard(req, res);
     if (!user) return;
+    const id = accountId(req.params.id);
+    if (!id) return noSuchAccount(res);
     const property = String(req.body?.property ?? '').trim();
     // The CHECK constraint refuses a spelling the API would 403 on; this turns that into a sentence.
-    const ok = await db.setProperty(user.id, String(req.params.id), property).catch(() => false);
-    tenants.forget(String(req.params.id));
+    const ok = await db.setProperty(user.id, id, property).catch(() => false);
+    tenants.forget(id);
     redirect(res, ok ? '/app?m=' + encodeURIComponent('Property set.') : '/app?e=' + encodeURIComponent('That is not a property Search Console would accept.'));
   });
 
   app.post('/app/accounts/:id/write', async (req, res) => {
     const user = await guard(req, res);
     if (!user) return;
+    const id = accountId(req.params.id);
+    if (!id) return noSuchAccount(res);
     const allow = String(req.body?.allow ?? '') === '1';
-    const ok = await db.setAllowWrite(user.id, String(req.params.id), allow);
+    const ok = await db.setAllowWrite(user.id, id, allow);
     // The cached client carries the old cfg, so a toggle that did not drop it would leave writes
     // enabled — or refused — for up to the cache TTL after the button said otherwise.
-    tenants.forget(String(req.params.id));
-    if (!ok) return redirect(res, '/app?e=' + encodeURIComponent('No such account.'));
+    tenants.forget(id);
+    if (!ok) return noSuchAccount(res);
     redirect(
       res,
       '/app?m=' +
@@ -317,9 +335,11 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     const user = await guard(req, res);
     if (!user) return;
 
+    const id = accountId(req.params.id);
+    if (!id) return noSuchAccount(res);
     const token = mintToken();
-    const ok = await db.addToken(user.id, String(req.params.id), tokenHash(token), null);
-    if (!ok) return redirect(res, '/app?e=' + encodeURIComponent('No such account.'));
+    const ok = await db.addToken(user.id, id, tokenHash(token), null);
+    if (!ok) return noSuchAccount(res);
     // Post/Redirect/Get: rendering here would leave the browser on a POST, where every refresh
     // mints another live credential.
     redirect(res, '/app?t=' + encodeURIComponent(oneShot.put(user.id, token)));
@@ -329,9 +349,10 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     const user = await guard(req, res);
     if (!user) return;
 
-    const id = String(req.params.id);
+    const id = accountId(req.params.id);
+    if (!id) return noSuchAccount(res);
     const ok = await db.beginDelete(user.id, id);
-    if (!ok) return redirect(res, '/app?e=' + encodeURIComponent('No such account.'));
+    if (!ok) return noSuchAccount(res);
     tenants.forget(id);
     // The tombstone and the token revocation are done; ending the Google grant is a call to
     // somebody else's service, so it happens here if it can and in the reaper if it cannot.
@@ -413,8 +434,10 @@ export function mountSaas(app: Express, d: SaasDeps): void {
 
     // Checked against the signed-in user before a consent is started, so the state cannot be made
     // to carry an account id belonging to somebody else.
-    const account = await db.getAccount(user.id, String(req.query.account ?? ''));
-    if (!account) return redirect(res, '/app?e=' + encodeURIComponent('No such account.'));
+    const id = accountId(req.query.account);
+    if (!id) return noSuchAccount(res);
+    const account = await db.getAccount(user.id, id);
+    if (!account) return noSuchAccount(res);
 
     try {
       const { url, cookie } = oauth.begin(account.id);
@@ -440,15 +463,18 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     }
 
     try {
-      const { accountId, grant } = await oauth.complete({
+      const { accountId: accountIdFromState, grant } = await oauth.complete({
         code: String(req.query.code ?? ''),
         state: String(req.query.state ?? ''),
         cookie: readRawCookie(req.headers.cookie, CONSENT_COOKIE),
       });
 
       // The account is re-fetched under the signed-in user rather than trusted from the state: the
-      // state proves the browser, this proves the owner.
-      const account = await db.getAccount(user.id, accountId);
+      // state proves the browser, this proves the owner. Shape-checked first, because the state is
+      // attacker-supplied even though it matched the cookie.
+      const id = accountId(accountIdFromState);
+      if (!id) return done('/app?e=' + encodeURIComponent('That consent does not belong to this account.'));
+      const account = await db.getAccount(user.id, id);
       if (!account) return done('/app?e=' + encodeURIComponent('That consent does not belong to this account.'));
 
       await db.setSecret(account.id, seal(masterKey, account.id, grant.refreshToken));

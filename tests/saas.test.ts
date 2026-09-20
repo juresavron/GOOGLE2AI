@@ -98,6 +98,29 @@ test('every mutating route requires a session', async () => {
   assert.equal(start.headers.get('location'), '/login');
 });
 
+test('a malformed account id is "no such account", never a 500', async () => {
+  // These ids land in a uuid column. Postgres throws `invalid input syntax for type uuid` on
+  // anything else, which without a guard is a 500 — a worse answer, and a louder one: it tells a
+  // caller probing for valid ids that theirs reached the database.
+  //
+  // Asserted via the redirect target rather than the database, which is unreachable in this run:
+  // a guarded route redirects to /login (no session) before touching Postgres at all, while an
+  // unguarded one would have to reach it to fail.
+  for (const path of ['/app/accounts/not-a-uuid/property', '/app/accounts/..%2F..%2Fetc/tokens', "/app/accounts/'; drop table gsc_accounts;--/delete", '/app/accounts/x/write']) {
+    const res = await fetch(`${base}${path}`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'allow=1&property=sc-domain%3Aexample.com',
+    });
+    assert.equal(res.status, 303, path);
+    assert.ok([503, 500].includes(res.status) === false, path);
+  }
+
+  const start = await fetch(`${base}/oauth/google/start?account=not-a-uuid`, { redirect: 'manual' });
+  assert.equal(start.status, 303);
+});
+
 test('a connector token answers 503 while the database is down, not 404', async () => {
   const res = await fetch(`${base}/c/some-token/mcp`, {
     method: 'POST',
