@@ -69,6 +69,7 @@ const CALLS = {
   beginDelete: [UUID, UUID],
   finishDelete: [UUID],
   pendingDeletes: [50],
+  otherLiveAccountsFor: ['someone@example.com', UUID],
   addToken: [UUID, UUID, 'b'.repeat(64), 'label'],
   listTokens: [UUID, UUID],
   revokeToken: [UUID, UUID],

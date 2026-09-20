@@ -32,7 +32,7 @@ class FakeDb {
   calls: { tool: string; ok: boolean }[] = [];
   perMinute = 0;
   touched: string[] = [];
-  pending: { id: string; sealed: any }[] = [];
+  pending: { id: string; sealed: any; googleEmail: string | null }[] = [];
   finished: string[] = [];
   droppedSecrets: string[] = [];
 
@@ -60,6 +60,11 @@ class FakeDb {
   }
   async pendingDeletes() {
     return this.pending;
+  }
+  /** How many LIVE accounts share the deleted one's Google account. Drives the revoke decision. */
+  shared = 0;
+  async otherLiveAccountsFor(): Promise<number> {
+    return this.shared;
   }
   async finishDelete(id: string): Promise<void> {
     this.finished.push(id);
@@ -209,7 +214,7 @@ test('a failing usage write does not throw into the caller', async () => {
 
 test('the reaper revokes at Google before it forgets the row', async () => {
   const db = new FakeDb();
-  db.pending = [{ id: ACCOUNT, sealed: seal(MASTER, ACCOUNT, '1//0refresh') }];
+  db.pending = [{ id: ACCOUNT, sealed: seal(MASTER, ACCOUNT, '1//0refresh'), googleEmail: 'jure@example.com' }];
   const revoked: string[] = [];
   const done = await build(db, async (t) => void revoked.push(t)).reap();
 
@@ -223,7 +228,7 @@ test('the reaper revokes at Google before it forgets the row', async () => {
 
 test('a reap that Google refuses leaves the row for the next pass', async () => {
   const db = new FakeDb();
-  db.pending = [{ id: ACCOUNT, sealed: seal(MASTER, ACCOUNT, '1//0refresh') }];
+  db.pending = [{ id: ACCOUNT, sealed: seal(MASTER, ACCOUNT, '1//0refresh'), googleEmail: 'jure@example.com' }];
   const done = await build(db, async () => {
     throw new Error('Google is down');
   }).reap();
@@ -237,7 +242,7 @@ test('a reap that Google refuses leaves the row for the next pass', async () => 
 
 test('a tombstoned row with no credential still gets cleaned up', async () => {
   const db = new FakeDb();
-  db.pending = [{ id: ACCOUNT, sealed: null }];
+  db.pending = [{ id: ACCOUNT, sealed: null, googleEmail: null }];
   assert.equal(await build(db, async () => assert.fail('nothing to revoke')).reap(), 1);
   assert.deepEqual(db.finished, [ACCOUNT]);
 });
@@ -331,4 +336,32 @@ test('the switch is cached, and forgetSettings makes a change visible at once', 
 
   t.forgetSettings();
   assert.equal(((await t.resolve('tok')) as { cfg: { allowWrite: boolean } }).cfg.allowWrite, true, 'and now it is not');
+});
+
+test('deleting one connection does not revoke a Google account\u2019s OTHER connections', async () => {
+  // Google's /revoke ends the GRANT for a (client, Google account) pair, not one token. Revoking
+  // on behalf of one deleted connection therefore killed every other connection the same Google
+  // account had here — and the operator's own connector, when it runs as that account. The row is
+  // still cleaned up; only the call to Google is skipped.
+  const db = new FakeDb();
+  db.pending = [{ id: ACCOUNT, sealed: seal(MASTER, ACCOUNT, '1//0refresh'), googleEmail: 'jure@example.com' }];
+  db.shared = 1;
+
+  const done = await build(db, async () => assert.fail('must not revoke a grant another connection is using')).reap();
+
+  assert.equal(done, 1);
+  assert.deepEqual(db.droppedSecrets, [ACCOUNT], 'the credential is still dropped — nothing here can reach it now');
+  assert.deepEqual(db.finished, [ACCOUNT]);
+});
+
+test('the last connection for a Google account DOES revoke the grant', async () => {
+  // The other half of the same decision: when nothing else is using it, withdrawing the grant is
+  // exactly what deleting a connection promised to do.
+  const db = new FakeDb();
+  db.pending = [{ id: ACCOUNT, sealed: seal(MASTER, ACCOUNT, '1//0refresh'), googleEmail: 'jure@example.com' }];
+  db.shared = 0;
+
+  const revoked: string[] = [];
+  assert.equal(await build(db, async (t) => void revoked.push(t)).reap(), 1);
+  assert.deepEqual(revoked, ['1//0refresh']);
 });

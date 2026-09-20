@@ -332,9 +332,9 @@ export class Db {
    * live Google grant with no owner and no UI to revoke it — the thing whatsapp2ai's schema note 3
    * warns about, in this product's costume.
    */
-  async pendingDeletes(limit = 50): Promise<{ id: string; sealed: Sealed | null }[]> {
+  async pendingDeletes(limit = 50): Promise<{ id: string; sealed: Sealed | null; googleEmail: string | null }[]> {
     const { rows } = await this.q.query(
-      `select a.id, s.sealed
+      `select a.id, a.google_email, s.sealed
          from public.gsc_accounts a
          left join public.gsc_account_secrets s on s.account_id = a.id
         where a.deleted_at is not null
@@ -342,7 +342,28 @@ export class Db {
         limit $1`,
       [limit],
     );
-    return rows.map((r) => ({ id: String(r.id), sealed: (r.sealed as Sealed | null) ?? null }));
+    return rows.map((r) => ({
+      id: String(r.id),
+      sealed: (r.sealed as Sealed | null) ?? null,
+      googleEmail: r.google_email == null ? null : String(r.google_email),
+    }));
+  }
+
+  /**
+   * Whether any account that is NOT on its way out still uses this Google account.
+   *
+   * Asked before revoking a deleted account's grant, because Google's /revoke ends the grant for a
+   * (client, Google account) pair rather than one token — so revoking on behalf of one deleted
+   * connection would silently kill every other connection the same Google account has here.
+   */
+  async otherLiveAccountsFor(googleEmail: string, excludingAccountId: string): Promise<number> {
+    const { rows } = await this.q.query(
+      `select count(*)::int as n
+         from public.gsc_accounts
+        where google_email = $1::text and id <> $2::uuid and deleted_at is null`,
+      [googleEmail, excludingAccountId],
+    );
+    return Number(rows[0]?.n ?? 0);
   }
 
   // ---------------------------------------------------------------- connector tokens

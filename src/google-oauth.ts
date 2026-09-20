@@ -226,9 +226,15 @@ export class GoogleOAuth {
     // refusal, and failing closed on it would break every consent if that field ever went away.
     const granted = String(body.scope ?? '').split(/\s+/).filter(Boolean);
     if (granted.length && !granted.includes(SEARCH_CONSOLE_SCOPE)) {
-      // The grant is being thrown away, so do not leave it live in the user's Google account.
-      // Best-effort: failing to revoke must not replace the message they need to read.
-      await this.revoke(String(body.refresh_token)).catch(() => {});
+      // NOT revoked, though the token is being discarded — and this used to revoke it.
+      //
+      // Google's /revoke ends the GRANT for a (client, Google account) pair, not one token. So
+      // tidying up this dead token would also kill every other refresh token that account holds
+      // for this client: the person's other connections here, and the operator's own connector
+      // when it runs as the same Google account. Losing working connectors to tidy away a token
+      // that, by the definition of this branch, has no Search Console scope at all is a bad trade.
+      //
+      // It expires on its own and the person can revoke it at myaccount.google.com/permissions.
       throw new OAuthError(
         'scope_declined',
         'Google did not grant Search Console access. On the consent screen, the "View and manage Search Console data for your verified sites" permission was left unticked — Google shows one checkbox per permission and ticking the top one does not tick the rest. Connect again and make sure every box is ticked.',

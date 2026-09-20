@@ -252,10 +252,14 @@ test('a consent that leaves Search Console unticked is refused, not stored', asy
     },
   );
 
-  // The grant is being thrown away, so it must not be left live in the user's Google account.
-  const revoked = g.sent.find((x) => x.url.includes('/revoke'));
-  assert.ok(revoked, 'the discarded refresh token is revoked');
-  assert.equal(revoked?.body.get('token'), GOOD_TOKEN.refresh_token);
+  // And it is NOT revoked, which is deliberate and used to be the other way round.
+  //
+  // Google's /revoke ends the GRANT for a (client, Google account) pair rather than one token, so
+  // tidying this dead token away would also kill every other refresh token that account holds for
+  // this client — the person's other connections here, and the operator's own connector when it
+  // runs as the same Google account. For a token that by definition has no Search Console scope,
+  // that is a bad trade.
+  assert.ok(!g.sent.some((x) => x.url.includes('/revoke')), 'revoking would take the account\u2019s other grants with it');
 });
 
 test('a token response with no scope field completes, rather than failing closed', async () => {

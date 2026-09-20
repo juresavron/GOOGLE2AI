@@ -307,11 +307,22 @@ export class Tenants {
   async reap(limit = 25): Promise<number> {
     const pending = await this.db.pendingDeletes(limit);
     let done = 0;
-    for (const { id, sealed } of pending) {
+    for (const { id, sealed, googleEmail } of pending) {
       try {
         if (sealed) {
           const refreshToken = unseal(this.masterKey, id, sealed);
-          await this.oauth.revoke(refreshToken);
+          // Google's /revoke ends the GRANT for a (client, Google account) pair, not one token —
+          // so revoking for this deleted connection would also kill every other connection the
+          // same Google account has here, and the operator's own connector when it runs as that
+          // account. Withdrawing the grant is still the right thing when this was the last one,
+          // which is what the count asks. When it is not, the sealed row is dropped and the token
+          // is simply abandoned: nothing here can reach it any more, and it expires on its own.
+          const shared = googleEmail ? await this.db.otherLiveAccountsFor(googleEmail, id) : 0;
+          if (shared > 0) {
+            this.log.info({ account: id, shared }, 'not revoking: this Google account still has other connections here');
+          } else {
+            await this.oauth.revoke(refreshToken);
+          }
           await this.db.dropSecret(id);
         }
         await this.db.finishDelete(id);
