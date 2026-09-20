@@ -87,8 +87,14 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
         run: |
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f scripts/ci-supabase-shim.sql
-          for f in db/schema.sql db/002_mirror.sql db/003_allow_write.sql \
-                   db/004_tenant_quota_project.sql db/005_all_properties.sql; do
+
+          # GLOBBED, not listed. A hardcoded list is a second place to remember a new migration,
+          # and it was forgotten the first time it mattered: 006 went into DEPLOY.md and not into
+          # this file, so CI built a schema with no gsc_settings and the run failed on a statement
+          # that was perfectly correct. schema.sql is named separately because it must be first and
+          # sorts last.
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f db/schema.sql
+          for f in $(ls db/[0-9]*.sql | sort); do
             echo "applying $f"
             psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"
           done
