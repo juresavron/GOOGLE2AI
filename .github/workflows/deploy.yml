@@ -67,11 +67,17 @@ jobs:
         run: flyctl deploy --remote-only -a google2ai --build-arg GIT_SHA=${{ github.sha }}
 
       - name: Confirm the deployed build is the one we just pushed
+        timeout-minutes: 4
         env:
           MACHINE: google2ai.fly.dev
         run: |
           sleep 20
-          curl -fsS --retry 5 --retry-delay 4 --retry-all-errors https://$MACHINE/healthz | tee /tmp/healthz.txt
+          # --max-time and --connect-timeout are load-bearing, not tidiness. Without them a
+          # SUSPENDED Fly app -- one whose proxy accepts the connection and then waits forever for a
+          # machine that never starts -- hangs this step until the job's 20-minute timeout, with no
+          # output and nothing to read. It happened. A verification step that cannot fail promptly
+          # is not verifying anything; it is just waiting.
+          curl -fsS --connect-timeout 10 --max-time 25 --retry 5 --retry-delay 4 --retry-all-errors https://$MACHINE/healthz | tee /tmp/healthz.txt
           echo
           test -s /tmp/healthz.txt || { echo "$MACHINE/healthz returned nothing"; exit 1; }
           grep -q "${GITHUB_SHA:0:7}" /tmp/healthz.txt \
@@ -79,7 +85,7 @@ jobs:
           echo "OK: live build matches ${GITHUB_SHA:0:7}"
 
           # /status is public and must stay that way -- it is the one endpoint a stranger can read.
-          curl -fsSL --retry 5 --retry-delay 4 --retry-all-errors https://$MACHINE/status | tee /tmp/status.json
+          curl -fsSL --connect-timeout 10 --max-time 25 --retry 5 --retry-delay 4 --retry-all-errors https://$MACHINE/status | tee /tmp/status.json
           echo
           python3 - <<'PY'
           import json, sys
