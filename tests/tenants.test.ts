@@ -17,6 +17,7 @@ const account = (over: Partial<Account> = {}): Account => ({
   label: 'Ocenagor',
   google_email: 'jure@example.com',
   property: 'sc-domain:ocenagor.si',
+  all_properties: false,
   quota_project: 'proj-from-row',
   status: 'connected',
   allow_write: false,
@@ -237,4 +238,14 @@ test('a minted token is never stored — only its hash', () => {
   assert.match(tokenHash(token), /^[0-9a-f]{64}$/);
   assert.notEqual(tokenHash(token), token);
   assert.notEqual(mintToken(), mintToken());
+});
+
+test('an all-properties account yields a connector with no default, not a broken one', async () => {
+  // `property` was only ever the fallback for an omitted siteUrl — nothing filters by it — so one
+  // connector always reached every property its Google account could see. The dashboard was the
+  // restriction, and somebody with twenty properties concluded they needed twenty connectors.
+  const db = connected(new FakeDb(), { property: null, all_properties: true });
+  const r = await build(db).resolve('tok');
+  assert.ok(isCtx(r));
+  assert.equal(r.cfg.defaultSite, '', 'empty, so tools.ts requires each call to name its own siteUrl');
 });

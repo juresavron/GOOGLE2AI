@@ -110,6 +110,31 @@ Two details worth keeping:
   posts say. The tool passes Google's answer through and says that accepting a notification is not
   the same as acting on it.
 
+## One connector, or one per property
+
+`gsc_accounts.property` was always only a **default**: `site()` in `tools.ts` falls back to it when
+`siteUrl` is omitted, and nothing anywhere filters by it. A connector could always reach every
+property its Google account can see. What made it look otherwise was the dashboard, which refused
+to mint a connector URL until a property was chosen — so somebody with twenty properties concluded
+they needed twenty connectors.
+
+Opening that up needed a **third state**, and it has its own column rather than a sentinel:
+
+| `property` | `all_properties` | means |
+|---|---|---|
+| set | false | that property is the default; others still reachable via `siteUrl` |
+| null | **true** | no default; every call names its own `siteUrl` |
+| null | false | nobody has chosen yet — the connector is unfinished |
+
+Collapsing the last two is the recurring bug this repository is most prone to: a day with zero
+impressions and a day never synced, an empty property list and a refused call. Two facts that share
+a representation become one fact nobody can recover.
+
+Note that none of this is an access control. What a connector can reach is what the consented
+Google account can reach — including the write tools, when both switches are on. Narrowing a
+connector to one property is not something this design offers, and claiming it does would be worse
+than not offering it.
+
 ## The instructions string
 
 `instructions(ctx)` in `tools.ts` is what Claude reads before calling anything, and it is most of

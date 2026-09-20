@@ -233,3 +233,23 @@ test('recordCall stores a code, never an argument', async () => {
   assert.deepEqual(values, [ACCOUNT, 'search_analytics', false, 13, 'bad_date']);
   assert.equal(values[3], 13, 'duration is rounded — the column is an integer');
 });
+
+test('setProperty keeps "all properties" and "not chosen yet" apart, in one statement', async () => {
+  // Three states, three representations. Collapsing the last two would repeat this codebase's most
+  // expensive recurring bug — an empty list and a refused call sharing one sentence, a day with
+  // zero impressions and a day never synced sharing one row.
+  const q = new FakeQ();
+  const db = new Db(q);
+
+  await db.setProperty(USER, ACCOUNT, 'sc-domain:example.com');
+  assert.match(q.last(), /all_properties = \(\$3 is null\)/, 'the flag is derived, never passed separately');
+  assert.equal(q.only().values[2], 'sc-domain:example.com');
+
+  const q2 = new FakeQ();
+  await new Db(q2).setProperty(USER, ACCOUNT, null);
+  assert.equal(q2.only().values[2], null, 'null is a real choice, not a skipped field');
+  // One statement, so a row can never be seen holding a default property AND the all-properties
+  // flag at the same time.
+  assert.equal(q2.seen.length, 1);
+  assert.match(q2.last(), /where id = \$1 and user_id = \$2/, 'and it is still user-scoped');
+});

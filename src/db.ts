@@ -28,6 +28,11 @@ export interface Account {
   label: string;
   google_email: string | null;
   property: string | null;
+  /**
+   * No default property, deliberately: every tool call names its own siteUrl. Distinct from
+   * `property === null` alone, which means nobody has chosen yet — see db/005_all_properties.sql.
+   */
+  all_properties: boolean;
   quota_project: string | null;
   status: AccountStatus;
   /** AND-ed with the server-wide cfg.allowWrite in tenants.ts. Both must be true. */
@@ -52,7 +57,7 @@ export interface TokenRow {
   revoked_at: Date | null;
 }
 
-const ACCOUNT_COLS = 'a.id, a.user_id, a.label, a.google_email, a.property, a.quota_project, a.status, a.allow_write, a.last_checked_at, a.last_error, a.created_at';
+const ACCOUNT_COLS = 'a.id, a.user_id, a.label, a.google_email, a.property, a.all_properties, a.quota_project, a.status, a.allow_write, a.last_checked_at, a.last_error, a.created_at';
 
 export class Db {
   // Written out rather than a `private readonly q` constructor parameter: parameter properties are
@@ -195,9 +200,14 @@ export class Db {
    * refuses a spelling the API would 403 on — enforced there rather than here so it holds for every
    * route, including ones not yet written.
    */
-  async setProperty(userId: string, accountId: string, property: string): Promise<boolean> {
+  async setProperty(userId: string, accountId: string, property: string | null): Promise<boolean> {
+    // Null is "all properties", not "unset": the two are different facts and the column pair keeps
+    // them apart. Written in ONE statement so a connector can never be observed with both a
+    // default property and the all-properties flag.
     const { rowCount } = await this.q.query(
-      `update public.gsc_accounts set property = $3, updated_at = now() where id = $1 and user_id = $2 and deleted_at is null`,
+      `update public.gsc_accounts
+          set property = $3, all_properties = ($3 is null), updated_at = now()
+        where id = $1 and user_id = $2 and deleted_at is null`,
       [accountId, userId, property],
     );
     return (rowCount ?? 0) > 0;

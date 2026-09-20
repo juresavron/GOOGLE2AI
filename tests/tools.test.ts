@@ -59,8 +59,17 @@ test('the instructions state the reporting lag, which is the fact that silently 
 });
 
 test('the instructions name the bound property when one is configured, and say to call list_sites when not', () => {
-  assert.match(instructions(makeCtx({ defaultSite: 'sc-domain:ocenagor.si' })), /Bound to sc-domain:ocenagor\.si/);
-  assert.match(instructions(makeCtx()), /call it first/);
+  const bound = instructions(makeCtx({ defaultSite: 'sc-domain:ocenagor.si' }));
+  assert.match(bound, /Bound to sc-domain:ocenagor\.si/);
+  // A default was never a limit — no tool filters by it — so saying only "bound to" invited the
+  // conclusion that reaching a second property needs a second connector.
+  assert.match(bound, /Other properties .* still reachable/, 'the default is a default, not a fence');
+
+  const all = instructions(makeCtx());
+  assert.match(all, /call it first/);
+  // And with no default, that is a configuration rather than an omission: one connector for every
+  // property is the shape anybody with more than a couple of sites wants.
+  assert.match(all, /reaches every property its Google account can see/);
 });
 
 test('every tool is registered, including the writes, which exist even when switched off', async () => {

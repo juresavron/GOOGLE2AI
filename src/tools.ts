@@ -111,9 +111,14 @@ const delta = (now: number, then: number) => {
  */
 export function instructions(ctx: Ctx): string {
   const { cfg } = ctx;
-  const bound = cfg.defaultSite ? ` Bound to ${cfg.defaultSite}, which every tool assumes when siteUrl is omitted.` : '';
+  // Two shapes, and the second is a real configuration rather than a missing one. A connector was
+  // never limited to its default property — no tool filters by it — so a deployment with many
+  // properties is expected to set no default and name one per call.
+  const bound = cfg.defaultSite
+    ? ` Bound to ${cfg.defaultSite}, which every tool assumes when siteUrl is omitted. Other properties on this account are still reachable by passing siteUrl.`
+    : ' This connector has no default property and reaches every property its Google account can see.';
   return `Google Search Console.${bound}
-Properties are addressed exactly as Search Console spells them: "sc-domain:example.com" for a domain property, "https://example.com/" (with the trailing slash) for a URL-prefix one. list_sites is the authority on which exist${cfg.defaultSite ? '' : ' — call it first, since no property is configured as the default'}.
+Properties are addressed exactly as Search Console spells them: "sc-domain:example.com" for a domain property, "https://example.com/" (with the trailing slash) for a URL-prefix one. list_sites is the authority on which exist${cfg.defaultSite ? '' : ' — call it first and pass siteUrl on every call, since there is no default to fall back on. If the person names a site in words ("the Spanish one"), match it against list_sites rather than guessing the spelling'}.
 Start with search_analytics for what people searched and where the site ranked, compare_periods for whether that is getting better or worse, inspect_url for why one page is or is not in the index, list_sitemaps for whether Google is reading the sitemap at all.
 SEARCH CONSOLE IS ${LAG_DAYS} DAYS BEHIND. There is no data for today or yesterday, and the last two days of any range are incomplete and will rise later. Ranges left unset end ${LAG_DAYS} days ago for that reason; a range that ends today is not an error but its tail is not real. Data older than 16 months does not exist at Google at all${ctx.mirror ? ', but this connector keeps its own copy of what it has already seen — status() says how far back that reaches, and a range inside it is answered from there without spending API quota' : ''}.
 Times are ${cfg.tz}.

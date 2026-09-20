@@ -147,8 +147,10 @@ export class Tenants {
       // true of a revoked token.
       return { unavailable: 'Google has withdrawn this connection. Reconnect the Google account in the dashboard — the connector URL itself stays the same.' };
     }
-    if (!account.property) {
-      return { unavailable: 'This connector has no Search Console property selected yet. Choose one in the dashboard.' };
+    // "No property" and "every property" are different accounts, and only the first is unfinished.
+    // all_properties is what tells them apart — see db/005_all_properties.sql.
+    if (!account.property && !account.all_properties) {
+      return { unavailable: 'This connector has no Search Console property selected yet. Choose one in the dashboard, or set it to all properties.' };
     }
 
     // Counted per account rather than per token: several tokens on one account share one quota,
@@ -196,7 +198,10 @@ export class Tenants {
       // switch would mean enabling writes for yourself enabled them for every tenant, and the
       // blast radius is somebody's property being removed from Search Console by an agent that
       // misread a sentence.
-      cfg: { ...this.cfg, defaultSite: account.property, allowWrite: this.cfg.allowWrite && account.allow_write },
+      // Empty when the account is set to all properties: tools.ts then requires every call to name
+      // its own siteUrl, and the instructions say so. It was never a restriction either way — no
+      // tool filters by it — so this only decides what happens when siteUrl is OMITTED.
+      cfg: { ...this.cfg, defaultSite: account.property ?? '', allowWrite: this.cfg.allowWrite && account.allow_write },
       gsc,
       // The mirror is keyed by account, so it only exists on this surface. The single-account
       // server has no database and no account id, and asks Google every time.

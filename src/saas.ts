@@ -52,6 +52,7 @@ const accountState = (a: Account): { state: State; label: string } => {
   if (a.status === 'pending') return { state: 'pending', label: 'Not connected' };
   if (a.status === 'revoked') return { state: 'danger', label: 'Google withdrew access' };
   if (a.status === 'failing') return { state: 'danger', label: 'Google is refusing' };
+  if (a.all_properties) return { state: 'ok', label: 'Ready — all properties' };
   if (!a.property) return { state: 'pending', label: 'No property chosen' };
   return { state: 'ok', label: 'Ready' };
 };
@@ -296,7 +297,13 @@ export function mountSaas(app: Express, d: SaasDeps): void {
                   sites.sites.length
                     ? `<form method="post" action="/app/accounts/${id}/property">
                          <label for="p-${id}">Which property?</label>
-                         <select id="p-${id}" name="property">${sites.sites.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('')}</select>
+                         <select id="p-${id}" name="property">
+                           <option value="">All ${sites.sites.length} properties — no default</option>
+                           ${sites.sites.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('')}
+                         </select>
+                         <p class="micro">One connector reaches every property this Google account can see, either way. Naming
+                           one only sets what a tool call means when it does not say — pick "all" and Claude names the property
+                           on each question instead.</p>
                          <div class="acts" style="margin-top:.625rem"><button class="primary" type="submit">Use this one</button></div>
                        </form>`
                     : sites.error
@@ -307,7 +314,9 @@ export function mountSaas(app: Express, d: SaasDeps): void {
                 );
               }
 
-              if (a.property) {
+              // Either choice is a finished connector. Gating this on `a.property` alone meant
+              // somebody with twenty properties had to make twenty connectors to reach them all.
+              if (a.property || a.all_properties) {
                 body.push(
                   `<div class="stats">
                      ${stat({ label: 'Connector URLs', value: tokens.length })}
@@ -434,11 +443,19 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     if (!user) return;
     const id = accountId(req.params.id);
     if (!id) return noSuchAccount(res);
-    const property = String(req.body?.property ?? '').trim();
+    // Empty is a real choice — "all properties, no default" — not a missing field. The select's
+    // first option submits it deliberately.
+    const raw = String(req.body?.property ?? '').trim();
+    const property = raw || null;
     // The CHECK constraint refuses a spelling the API would 403 on; this turns that into a sentence.
     const ok = await db.setProperty(user.id, id, property).catch(() => false);
     tenants.forget(id);
-    redirect(res, ok ? '/app?m=' + encodeURIComponent('Property set.') : '/app?e=' + encodeURIComponent('That is not a property Search Console would accept.'));
+    redirect(
+      res,
+      ok
+        ? '/app?m=' + encodeURIComponent(property ? 'Property set.' : 'Set to all properties — Claude will name one on each question.')
+        : '/app?e=' + encodeURIComponent('That is not a property Search Console would accept.'),
+    );
   });
 
   app.post('/app/accounts/:id/write', async (req, res) => {
