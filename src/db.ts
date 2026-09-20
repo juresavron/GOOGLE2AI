@@ -319,6 +319,60 @@ export class Db {
     return (rowCount ?? 0) > 0;
   }
 
+  // ---------------------------------------------------------------- the operator panel
+
+  /**
+   * Every account on the deployment, for the ADMIN_EMAILS-gated panel.
+   *
+   * This one is NOT user-scoped, and it is the only read in this file that is not — which is
+   * exactly why it is down here under its own heading rather than mixed in with the rest. The gate
+   * is in the route, checked server-side on every request, and `adminEmails` empty means nobody.
+   * `last_error` is included because the panel exists to answer "why is this customer's connector
+   * broken", which is the one question the tenant dashboard deliberately cannot show.
+   */
+  async allAccounts(limit = 200): Promise<(Account & { tokens: number; calls_24h: number })[]> {
+    const { rows } = await this.q.query(
+      `select ${ACCOUNT_COLS},
+              (select count(*)::int from public.mcp_tokens t where t.account_id = a.id and t.revoked_at is null) as tokens,
+              (select count(*)::int from public.mcp_calls c where c.account_id = a.id and c.created_at > now() - interval '24 hours') as calls_24h
+         from public.gsc_accounts a
+        where a.deleted_at is null
+        order by a.created_at desc
+        limit $1`,
+      [limit],
+    );
+    return rows as (Account & { tokens: number; calls_24h: number })[];
+  }
+
+  /** Deployment-wide totals. Counts only — the panel shows names in the table above, not here. */
+  async totals(): Promise<{ accounts: number; connected: number; tokens: number; calls_24h: number; errors_24h: number }> {
+    const { rows } = await this.q.query(
+      `select
+         (select count(*)::int from public.gsc_accounts where deleted_at is null) as accounts,
+         (select count(*)::int from public.gsc_accounts where deleted_at is null and status = 'connected') as connected,
+         (select count(*)::int from public.mcp_tokens where revoked_at is null) as tokens,
+         (select count(*)::int from public.mcp_calls where created_at > now() - interval '24 hours') as calls_24h,
+         (select count(*)::int from public.mcp_calls where created_at > now() - interval '24 hours' and not ok) as errors_24h`,
+    );
+    return rows[0] as { accounts: number; connected: number; tokens: number; calls_24h: number; errors_24h: number };
+  }
+
+  /**
+   * What is going wrong across the deployment, by error code. Codes only — src/tools.ts errorCode()
+   * is a closed vocabulary precisely so this panel can be useful without becoming a second copy of
+   * anybody's search traffic.
+   */
+  async errorBreakdown(hours = 24): Promise<{ error_code: string; n: number }[]> {
+    const { rows } = await this.q.query(
+      `select coalesce(error_code, 'unknown') as error_code, count(*)::int as n
+         from public.mcp_calls
+        where not ok and created_at > now() - make_interval(hours => $1)
+        group by 1 order by n desc limit 20`,
+      [hours],
+    );
+    return rows as { error_code: string; n: number }[];
+  }
+
   // ---------------------------------------------------------------- usage, for the dashboard
 
   async recentCalls(userId: string, accountId: string, limit = 20): Promise<Record<string, any>[]> {

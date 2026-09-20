@@ -16,6 +16,7 @@ import { clearConsentCookie, consentCookie, CONSENT_COOKIE, GoogleOAuth, OAuthEr
 import type { Config } from './env.ts';
 import { esc, page } from './html.ts';
 import { mountMcp } from './mcp.ts';
+import { mountPages } from './pages.ts';
 import { seal } from './secrets.ts';
 import { mintToken, Tenants, tokenHash } from './tenants.ts';
 
@@ -85,6 +86,12 @@ export function mountSaas(app: Express, d: SaasDeps): void {
   // cookie. Its resolver is the only thing that differs from the single-account route.
   mountMcp(app, '/c/:token/mcp', (req) => tenants.resolve(String(req.params.token ?? '')), log);
 
+  // ---------------------------------------------------------------- legal
+
+  // Not decoration: Google's OAuth verification asks for both before it will publish a consent
+  // screen, and an unpublished one expires every tenant's refresh token after seven days.
+  mountPages(app, cfg);
+
   // ---------------------------------------------------------------- landing
 
   // With the tenant surface mounted this owns /, so the single-account build's placeholder is not
@@ -98,7 +105,8 @@ export function mountSaas(app: Express, d: SaasDeps): void {
         `<h1>GOOGLE2AI</h1>
          <p>Your Google Search Console, in Claude. Ask what people searched for, which pages are gaining or losing, and why a page is not indexed — in the conversation, not in a dashboard.</p>
          <p style="${S.muted}">Read-only. This connector cannot submit URLs, change settings or write anything to your property.</p>
-         <p><a style="${S.btn};text-decoration:none;display:inline-block" href="/login">Sign in</a></p>`,
+         <p><a style="${S.btn};text-decoration:none;display:inline-block" href="/login">Sign in</a></p>
+         <p style="${S.muted}"><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></p>`,
       ),
     );
   });
@@ -123,7 +131,8 @@ export function mountSaas(app: Express, d: SaasDeps): void {
              <p><label>Email<br><input style="${S.input}" type="email" name="email" autocomplete="email" required></label></p>
              <p><label>Password<br><input style="${S.input}" type="password" name="password" autocomplete="new-password" minlength="8" required></label></p>
              <p><button style="${S.ghost}" type="submit">Create account</button></p>
-           </form>`,
+           </form>
+           <p style="${S.muted}"><a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></p>`,
       ),
     );
   });
@@ -216,7 +225,7 @@ export function mountSaas(app: Express, d: SaasDeps): void {
            <h1 style="margin:0">GOOGLE2AI</h1>
            <form method="post" action="/logout"><button style="${S.ghost}" type="submit">Sign out</button></form>
          </div>
-         <p style="${S.muted}">${esc(user.email)}</p>` +
+         <p style="${S.muted}">${esc(user.email)}${isAdmin(user) ? ` · <a href="/app/operator">operator</a>` : ''}</p>` +
           notice(msg) +
           notice(err, true) +
           (fresh
@@ -297,6 +306,72 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     // somebody else's service, so it happens here if it can and in the reaper if it cannot.
     void tenants.reap().catch((e) => log.error({ err: String(e) }, 'reap after delete failed'));
     redirect(res, '/app?m=' + encodeURIComponent('Deleted. Its connector URLs stopped working immediately.'));
+  });
+
+  // ---------------------------------------------------------------- operator panel
+
+  /**
+   * ADMIN_EMAILS, checked SERVER-SIDE on every request. Empty means nobody, which is the right
+   * default for a page that lists every customer on the deployment — the alternative is that a
+   * deployment which forgot to configure it has an open one.
+   *
+   * Compared against the address GoTrue reports for the session, not one from the request.
+   */
+  const isAdmin = (user: SessionUser): boolean => cfg.adminEmails.length > 0 && cfg.adminEmails.includes(user.email.trim().toLowerCase());
+
+  app.get('/app/operator', async (req, res) => {
+    const user = await guard(req, res);
+    if (!user) return;
+    // 404, not 403: a signed-in stranger learns nothing about whether this panel exists.
+    if (!isAdmin(user)) return res.status(404).type('text/plain').send('not found');
+
+    const [totals, accounts, errors] = await Promise.all([db.totals(), db.allAccounts(), db.errorBreakdown()]);
+
+    const stat = (label: string, value: string | number) =>
+      `<div style="border:1px solid #e3e3e3;border-radius:10px;padding:.7rem .9rem;min-width:7rem">
+         <div style="font-size:1.5rem;line-height:1.2">${esc(value)}</div><div style="${S.muted}">${esc(label)}</div>
+       </div>`;
+
+    const rows = accounts
+      .map(
+        (a) =>
+          `<tr style="border-top:1px solid #eee">
+             <td style="padding:.45rem .6rem .45rem 0">${esc(a.label)}</td>
+             <td style="padding:.45rem .6rem">${esc(a.google_email ?? '—')}</td>
+             <td style="padding:.45rem .6rem">${esc(a.property ?? '—')}</td>
+             <td style="padding:.45rem .6rem">${esc(a.status)}</td>
+             <td style="padding:.45rem .6rem;text-align:right">${a.tokens}</td>
+             <td style="padding:.45rem .6rem;text-align:right">${a.calls_24h}</td>
+             <td style="padding:.45rem 0;color:#8a1f1f;font-size:.85rem">${esc(a.last_error ?? '')}</td>
+           </tr>`,
+      )
+      .join('');
+
+    res.type('html').send(
+      page(
+        'Operator · GOOGLE2AI',
+        `<div style="display:flex;justify-content:space-between;align-items:baseline">
+           <h1 style="margin:0">Operator</h1><a href="/app" style="${S.muted}">back to dashboard</a>
+         </div>
+         <div style="display:flex;gap:.6rem;flex-wrap:wrap;margin:1rem 0">
+           ${stat('accounts', totals.accounts)}${stat('connected', totals.connected)}${stat('connector URLs', totals.tokens)}
+           ${stat('calls 24h', totals.calls_24h)}${stat('errors 24h', totals.errors_24h)}
+         </div>
+         <table style="border-collapse:collapse;width:100%;font-size:.95rem">
+           <tr style="text-align:left;${S.muted}">
+             <th style="padding:0 .6rem .3rem 0">label</th><th style="padding:0 .6rem .3rem">google</th>
+             <th style="padding:0 .6rem .3rem">property</th><th style="padding:0 .6rem .3rem">status</th>
+             <th style="padding:0 .6rem .3rem;text-align:right">urls</th><th style="padding:0 .6rem .3rem;text-align:right">24h</th>
+             <th style="padding:0 0 .3rem">last error</th>
+           </tr>${rows || `<tr><td colspan="7" style="padding:.6rem 0;${S.muted}">No accounts yet.</td></tr>`}
+         </table>` +
+          (errors.length
+            ? `<h2 style="font-size:1rem;margin:1.5rem 0 .5rem">Failures in the last 24 hours</h2>
+               <p style="${S.muted}">Codes only — a closed vocabulary, so this panel cannot become a second copy of anybody's search traffic.</p>
+               <ul>${errors.map((e) => `<li><code>${esc(e.error_code)}</code> &times; ${e.n}</li>`).join('')}</ul>`
+            : ''),
+      ),
+    );
   });
 
   // ---------------------------------------------------------------- Google consent

@@ -129,6 +129,42 @@ test('/app.js is served, so the CSP can keep refusing inline script', async () =
   assert.match(await res.text(), /data-confirm|dataset\.confirm/);
 });
 
+test('the legal pages render, and refuse to invent an operator', async () => {
+  for (const path of ['/privacy', '/terms']) {
+    const res = await fetch(`${base}${path}`);
+    assert.equal(res.status, 200, path);
+    const html = await res.text();
+    // OPERATOR_NAME and OPERATOR_CONTACT are unset in this run. A policy naming nobody is worse
+    // than no policy, and an invented company would be a lie told to someone deciding whether to
+    // trust this with their Google account.
+    assert.match(html, /has not said who runs it/, path);
+    assert.match(html, /OPERATOR_NAME/, path);
+  }
+});
+
+test('the privacy page states the read-only scope and what is not stored', async () => {
+  const html = await (await fetch(`${base}/privacy`)).text();
+  assert.match(html, /webmasters\.readonly/);
+  // The two claims the rest of the codebase actually has to keep: no copy of the traffic, and only
+  // a hash of the connector URL.
+  assert.match(html, /never a search term/);
+  assert.match(html, /SHA-256 hash/);
+});
+
+test('the operator panel is not reachable without a session', async () => {
+  const res = await fetch(`${base}/app/operator`, { redirect: 'manual' });
+  assert.equal(res.status, 303);
+  assert.equal(res.headers.get('location'), '/login');
+});
+
+test('the legal pages are linked from the pages a stranger lands on', async () => {
+  for (const path of ['/', '/login']) {
+    const html = await (await fetch(`${base}${path}`)).text();
+    assert.match(html, /href="\/privacy"/, path);
+    assert.match(html, /href="\/terms"/, path);
+  }
+});
+
 test('the tenant build refuses to start with no MASTER_KEY', async () => {
   // Starting would mean storing every tenant's Google refresh token unsealed, on a server that
   // looks healthy right up until the database leaks.
