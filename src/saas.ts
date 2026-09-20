@@ -421,7 +421,11 @@ export function mountSaas(app: Express, d: SaasDeps): void {
     // Not a plan, a ceiling: every account is a live Google grant this server is responsible for.
     if ((await db.countAccounts(user.id)) >= MAX_ACCOUNTS) return redirect(res, '/app?e=' + encodeURIComponent(`Maximum of ${MAX_ACCOUNTS} reached.`));
 
-    const a = await db.createAccount(user.id, label, cfg.quotaProject || null);
+    // Deliberately NOT cfg.quotaProject. Seeding a tenant's row with the operator's Google Cloud
+    // project made every tenant call send x-goog-user-project for a project the tenant has no IAM
+    // on, which Google refuses with a 403 — see gsc.ts. Null means "attribute quota the default
+    // way", which is to the project owning the OAuth client: the operator's, without the IAM.
+    const a = await db.createAccount(user.id, label, null);
     redirect(res, `/oauth/google/start?account=${encodeURIComponent(a.id)}`);
   });
 

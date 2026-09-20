@@ -120,13 +120,28 @@ test('a live connector resolves, bound to its own property', async () => {
   assert.equal(r.cfg.defaultSite, 'sc-domain:ocenagor.si');
 });
 
-test('the account row’s quota project wins over the environment', async () => {
+const quotaOf = (r: unknown) => (r as { gsc: { status(): { quota_project: string | null; auth: string } } }).gsc.status();
+
+test('the account row’s quota project is used when it has one', async () => {
   const db = connected(new FakeDb());
   const r = await build(db).resolve('tok');
   assert.ok(isCtx(r));
-  const status = (r.gsc as { status(): { quota_project: string | null; auth: string } }).status();
+  const status = quotaOf(r);
   assert.equal(status.quota_project, 'proj-from-row');
   assert.equal(status.auth, 'tenant', 'a tenant client must never report the operator’s auth chain');
+});
+
+test('a tenant with NO quota project does not inherit the operator’s', async () => {
+  // This inheritance broke every tenant call with a 403. x-goog-user-project asserts that the
+  // CALLER may consume quota in that project, and Google checks serviceusage.services.use against
+  // the identity that consented — a tenant, who is a stranger to the operator's Cloud project. The
+  // remedy Google's message proposes (grant them roles/serviceusage.serviceUsageConsumer) means
+  // adding every customer as an IAM principal, so the fix is to send no header at all: quota then
+  // attributes to the project owning the OAuth client, which is the operator's regardless.
+  const db = connected(new FakeDb(), { quota_project: null });
+  const r = await build(db).resolve('tok');
+  assert.ok(isCtx(r));
+  assert.equal(quotaOf(r).quota_project, null, 'proj-from-env must not leak into a tenant client');
 });
 
 test('the built client is reused, so a tool call does not cost a token exchange', async () => {

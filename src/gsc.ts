@@ -116,6 +116,13 @@ export function cleanError(e: unknown): string {
   // A 403 for a missing SCOPE and a 403 for missing ACCESS look alike and have nothing in common
   // as remedies: one is fixed by reconnecting and ticking a box, the other by being added to the
   // property in Search Console. Sending someone to the wrong one costs an afternoon.
+  // Quota project attached, but the CONSENTING account has no IAM on it. Distinct from the two
+  // below: nothing about the property or the token is wrong, and no amount of Search Console
+  // permission fixes it. On the tenant surface this should now be unreachable — accounts no longer
+  // inherit the operator's project — so if it appears, an account has one set deliberately.
+  if (status === 403 && /serviceusage|serviceUsageConsumer|required permission to use project/i.test(inner)) {
+    return `Google refused the call because the Google account that consented has no permission to use the quota project named for it (403). That is a Cloud IAM setting, not a Search Console one: either clear this account's quota project so quota attributes to the OAuth client's own project, or grant that account roles/serviceusage.serviceUsageConsumer on it. (${inner})`;
+  }
   if (status === 403 && /insufficient authentication scopes|ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(inner)) {
     return `Google refused the call because this token carries no Search Console permission (403). That is granted on the consent screen, which has one checkbox per permission — reconnect the account and tick every box. Being an owner of the property does not help until the token has the scope. (${inner})`;
   }
@@ -147,7 +154,20 @@ export interface TenantCreds {
   clientId: string;
   clientSecret: string;
   refreshToken: string;
-  /** The tenant's row overrides the environment, so one account can be billed to another project. */
+  /**
+   * Empty for almost every tenant, and that is the correct value — not a gap.
+   *
+   * `x-goog-user-project` does not mean "bill this project". It means "I, the authenticated
+   * caller, am entitled to consume quota in this project", and Google checks
+   * `serviceusage.services.use` for the identity that consented. A tenant is a stranger to the
+   * operator's Cloud project, so sending it produced a hard 403 on every call — with a message
+   * about IAM roles, for a product where the only honest fix would be adding every customer as an
+   * IAM principal.
+   *
+   * Sending nothing attributes quota to the project that owns the OAuth CLIENT, which is the
+   * operator's project anyway. Same payer, no IAM. Set per-account only when a tenant genuinely
+   * has their own Cloud project AND the consenting account has that role on it.
+   */
   quotaProject: string;
 }
 
@@ -210,9 +230,11 @@ export class GoogleGSC implements GSC {
   /**
    * The quota project travels as a header rather than as a client option.
    *
-   * GoogleAuth accepts `quotaProjectId`, the OAuth2 client does not — and OAuth2 is precisely the
-   * path that REQUIRES one. One header covers both, and applying it uniformly means the service
-   * account paths (which bill their own project and ignore it) behave no differently.
+   * GoogleAuth accepts `quotaProjectId`, the OAuth2 client does not, so one header covers both and
+   * the service account paths (which bill their own project and ignore it) behave no differently.
+   *
+   * It is sent only when there is a project to send. The operator sets GOOGLE_QUOTA_PROJECT and
+   * has IAM on it; a tenant has neither, and inheriting the operator's was a 403 on every call.
    */
   private opts(): { headers?: Record<string, string> } {
     const project = this.tenant ? this.tenant.quotaProject : this.cfg.quotaProject;

@@ -118,7 +118,10 @@ export class Tenants {
       clientId: this.cfg.clientId,
       clientSecret: this.cfg.clientSecret,
       refreshToken,
-      quotaProject: account.quota_project || this.cfg.quotaProject,
+      // NOT `|| this.cfg.quotaProject`. See the note on TenantCreds.quotaProject in gsc.ts: the
+      // operator's project is exactly the wrong default, because the header asserts that the
+      // TENANT may consume quota there.
+      quotaProject: account.quota_project || '',
     });
     this.cache.set(account.id, { gsc, at: Date.now() });
     this.sweep();
@@ -174,9 +177,8 @@ export class Tenants {
         clientId: this.cfg.clientId,
         clientSecret: this.cfg.clientSecret,
         refreshToken,
-        // The row wins over the environment, so one tenant can be billed to a different project
-        // without a redeploy.
-        quotaProject: account.quota_project || this.cfg.quotaProject,
+        // Only what the row explicitly says, never the operator's own project — see clientFor.
+        quotaProject: account.quota_project || '',
       });
       this.cache.set(account.id, { gsc, at: Date.now() });
       this.sweep();

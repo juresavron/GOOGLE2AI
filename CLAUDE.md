@@ -57,9 +57,23 @@ box, which is not the order Google documents:
 - `oauth` runs the calls as the person who consented, who already has access to everything they
   own. It is the only path that works, so it is first.
 
-`GOOGLE_QUOTA_PROJECT` is required with OAuth and ignored with a service account key, and its
-absence produces a `403` whose message reads like a permissions problem. `cleanError` in `gsc.ts`
-separates that `403` from the other one by name, because their remedies have nothing in common.
+`GOOGLE_QUOTA_PROJECT` is ignored with a service account key and travels as `x-goog-user-project`
+otherwise. Read that header correctly, because its name is misleading: it does not say "bill this
+project", it asserts that **the authenticated caller may consume quota there**, and Google checks
+`serviceusage.services.use` for the identity that consented.
+
+For the operator that identity is the operator, so it works. For a **tenant** it is a stranger to
+the operator's Cloud project, and seeding `gsc_accounts.quota_project` from the environment made
+every tenant call 403 with an IAM message whose proposed remedy — grant each one
+`roles/serviceusage.serviceUsageConsumer` — would mean adding every customer as an IAM principal.
+So a tenant's is **null**, and null sends no header: quota then attributes to the project owning
+the OAuth client, which is the operator's regardless. Same payer, no IAM
+(`db/004_tenant_quota_project.sql`).
+
+`cleanError` in `gsc.ts` now separates **four** 403s — no quota project, no permission to *use* the
+quota project, a token never granted the Search Console scope, and no access to the property —
+because their remedies have nothing in common and three of them are fixed nowhere near Search
+Console.
 
 **The domain has a lag, and the lag is a correctness problem.** Search Console publishes nothing for
 today or yesterday and the last two days of any range are incomplete. A range defaulting to today
@@ -162,7 +176,9 @@ What that means concretely, so nobody adds half of it back by accident:
   Google grant this deployment is responsible for, and the limit exists so one user cannot take the
   shared API quota down by accident. It is not a lever to sell against.
 - `gsc_accounts.quota_project` is about who pays **Google Cloud** for API quota. It is the only
-  thing in this repository the word "billing" refers to.
+  thing in this repository the word "billing" refers to, and it is normally null — see the header
+  note above. Set it only for a tenant who has their own Cloud project *and* whose consenting
+  Google account holds `serviceUsageConsumer` on it.
 - Access is controlled by sign-in and by connector tokens, both revocable. There is no paid state
   for anything to check, so there is no path where a lapsed payment can silently disable a
   connector — which is one fewer failure mode than either sibling has.
