@@ -3,8 +3,14 @@
 // the conditions which make a statement safe are actually in the SQL.
 //
 // What a fake CANNOT prove is that the SQL is valid, since it accepts any string. That is covered
-// separately: scripts/check-sql.py parses db/*.sql with Postgres's own grammar, and the statements
-// below were each PREPAREd against a real Postgres once, against the applied schema.
+// separately, and it is now a CHECK rather than a habit: scripts/check-sql.py parses db/*.sql with
+// Postgres's own grammar, and scripts/check-db-sql.mjs drives every method here through a
+// recording fake and hands each captured statement to a real Postgres with INFERRED parameter
+// types — the position node-postgres actually puts the server in.
+//
+// That second script exists because this comment used to end "...were each PREPAREd against a real
+// Postgres once", by hand. The ritual was skipped for one statement and what shipped could not be
+// parsed at all (42P08), reaching production as a button that blamed the user's spelling.
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { Db, type QueryResult, type Queryable } from '../src/db.ts';

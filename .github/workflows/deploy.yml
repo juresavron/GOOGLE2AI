@@ -38,6 +38,25 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
+    # A REAL Postgres, for the last step in this job.
+    #
+    # Not for the unit tests -- those stay offline against fakes, deliberately. This is for the
+    # statements in src/db.ts, which until now nothing could check: tests/db.test.ts drives a fake
+    # Queryable that accepts any string, and scripts/check-sql.py only parses db/*.sql. The safety
+    # net was a line in a comment saying each statement "was PREPAREd against a real Postgres
+    # once", by hand. That ritual failed, and what shipped was a statement Postgres refuses to
+    # parse at all -- 42P08 on every call, surfacing as a button that blamed the user's spelling.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -53,6 +72,21 @@ jobs:
       # runs in production.
       - name: The SQL is valid Postgres
         run: pip install --quiet pglast && python3 scripts/check-sql.py
+
+      # The other half: the statements that live in TypeScript rather than in db/*.sql. The schema
+      # is applied for real first, so a column that does not exist fails here too -- pglast would
+      # happily parse a select naming one that was never created.
+      - name: Every statement in src/db.ts parses against a real Postgres
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f scripts/ci-supabase-shim.sql
+          for f in db/schema.sql db/002_mirror.sql db/003_allow_write.sql \
+                   db/004_tenant_quota_project.sql db/005_all_properties.sql; do
+            echo "applying $f"
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+          node --disable-warning=ExperimentalWarning scripts/check-db-sql.mjs
 
   deploy:
     needs: test # never deploy a red build

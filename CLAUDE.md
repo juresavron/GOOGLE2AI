@@ -155,6 +155,23 @@ convenience: it is what lets CI assert real behaviour instead of just that the p
 - `tests/e2e.test.ts` — the actual server over actual HTTP: headers, the secret guard, the
   handshake, and the `/status` leak assertions
 
+Two checks run outside the Node suite, because a fake `Queryable` accepts any string and therefore
+proves nothing about SQL:
+
+- `scripts/check-sql.py` parses `db/*.sql` with Postgres's own grammar.
+- `scripts/check-db-sql.mjs` drives **every** `Db` method through a recording fake, applies the
+  real schema to a real Postgres (CI service container plus `scripts/ci-supabase-shim.sql`, 28
+  lines standing in for `auth.users`, `auth.uid()` and the three roles), and PREPAREs each captured
+  statement **with inferred parameter types** — the position node-postgres puts the server in,
+  since it sends no type OIDs.
+
+That last distinction is the whole point. `setProperty` once carried `all_properties = ($3 is
+null)`, which `PREPARE sp(uuid, uuid, text)` accepts by hand and the driver cannot use at all:
+`IS NULL` constrains nothing, so the parameter has no inferable type and the statement fails to
+parse (42P08) for every value. It shipped, because the only thing standing behind these statements
+was a comment saying each had been PREPAREd once. A method added without an entry in that script's
+call table fails the check, so a new statement cannot reach production unparsed.
+
 The mock is deterministic on purpose. One that drifted would make the suite flake for reasons
 unrelated to the server.
 
